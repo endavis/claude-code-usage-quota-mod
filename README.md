@@ -22,7 +22,7 @@ Type **`/quota`** to turn the pane off and on. Closing the pane turns it off too
 - **Last turn**: how long it took, its output tokens and its model.
 - **Agents**: the subagents and teammates running right now.
 
-**Choose what shows.** Each part is a setting, on by default: open `/config` (or `/plugin configure usage-quota@claude-code-usage-quota-mod`) and turn off any of *Show plan limits*, *Show context window*, *Show turns until compact*, *Show cache countdown*, *Show cache hit rate*, *Show session cost*, *Show last turn* and *Show running agents*. Claude Code reloads the mod with the change.
+**Choose what shows.** Press **Settings** in the pane: a second pane opens with each setting as a button (`[x] Show cache countdown`, `Placement: right`), its number pressing it. A press saves the change as `/config` would, and Claude Code reloads the mod with it; Esc closes the settings pane. Or open `/config` (or `/plugin configure usage-quota@claude-code-usage-quota-mod`) and turn off any of *Show plan limits*, *Show context window*, *Show turns until compact*, *Show cache countdown*, *Show cache hit rate*, *Show session cost*, *Show last turn* and *Show running agents*. Claude Code reloads the mod with the change.
 
 ## EXPANDED
 

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderChildren, RenderElement, RenderInput, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, SessionInfo, Snapshot } from '../types'
+import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, QuotaSettings, SessionInfo, SettingRow, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -17,6 +17,7 @@ const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as
 const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', waits: false, stuck: false } as Hold)
 const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
+const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null } as QuotaSettings)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -24,6 +25,9 @@ const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const,
 // the prompt otherwise; or `bottom`, the band above the prompt
 const PANE = 'usage-quota'
 const PANE_TITLE = 'Usage'
+// a second pane, opened from the first: each of this mod's /config rows as a button
+const SETTINGS = 'usage-quota-settings'
+const SETTINGS_TITLE = 'Quota settings'
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -1115,6 +1119,43 @@ async function refreshSession($: EngineInterface): Promise<void> {
   }
 }
 
+// The settings pane reads this mod's own /config rows and changes them as the menu
+// would ($.config.set): the value is saved where /config saves it, and Claude Code
+// reloads the mod with it. The pane stays open across that reload.
+async function loadSettings($: EngineInterface): Promise<void> {
+  try {
+    const rows: SettingRow[] = (await $.config.list())
+      .filter(row => row.key.startsWith('usage-quota.'))
+      .map(row => ({ key: row.key, label: row.label, value: row.value, ...(row.options ? { options: row.options } : {}) }))
+    await update($, settings, s => ({ ...s, rows }))
+  } catch (error) {
+    await update($, settings, s => ({ ...s, error: `settings not read: ${error instanceof Error ? error.message : String(error)}` }))
+  }
+}
+
+async function openSettings($: EngineInterface): Promise<void> {
+  await loadSettings($)
+  await $.ui.open({ id: SETTINGS, title: SETTINGS_TITLE, focus: true, closeOnEscape: true })
+}
+
+// a toggle flips; a choice moves to its next option
+export function nextValue(row: SettingRow): SettingRow['value'] {
+  if (typeof row.value === 'boolean') return !row.value
+  const options = row.options ?? []
+  const at = options.indexOf(String(row.value))
+  return options.length > 0 ? options[(at + 1) % options.length]! : row.value
+}
+
+async function changeSetting($: EngineInterface, row: SettingRow): Promise<void> {
+  try {
+    const { deny } = await $.config.set({ key: row.key, value: nextValue(row) })
+    await update($, settings, s => ({ ...s, error: deny ? `${row.label}: ${deny}` : null }))
+  } catch (error) {
+    await update($, settings, s => ({ ...s, error: `${row.label}: ${error instanceof Error ? error.message : String(error)}` }))
+  }
+  await loadSettings($)
+}
+
 async function closePane($: EngineInterface): Promise<void> {
   try {
     if ((await $.ui.panes()).some(pane => pane.id === PANE)) await $.ui.close({ id: PANE })
@@ -1159,6 +1200,8 @@ export const register: Register = (on, options) => {
     })
     // a reload keeps the transcript's path: look at the lifetime again
     void detectTtl($)
+    // a change from the settings pane reloads the module: show the new values
+    void loadSettings($)
     if (placement === 'right') {
       // opened unasked: docked from 144 columns (110 once the person has opened it),
       // waiting undrawn below that until /quota or a wider terminal
@@ -1276,6 +1319,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e)) // a close is never held back by this
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
+  on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => drawSettings($, e))
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
 }
 
@@ -1337,7 +1381,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   // The header: the headline beside the controls when both fit, else the controls
   // on a row of their own beneath it
   // (the desktop's letters are narrower than its cells: about 0.8 of one)
-  const CONTROLS = 40
+  const CONTROLS = 50
   // in the band, the terminal draws its own hide control ([-]) over the top-right
   // corner: the first row keeps clear of it (a pane's close mark has a row of its own)
   const HOST_HIDE = isBand && !Svg ? 4 : 0
@@ -1408,6 +1452,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
       <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0}>
         <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
       </Box>
+      <Button key="settings" label="Settings" plain onPress={() => openSettings($)} />
       <Button
         key="collapse"
         label={collapsed ? '▲' : '▼'}
@@ -1754,6 +1799,34 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
 
       {detailBlock && (collapsed ? compactItems.length > 0 : show.limits || show.context) ? <Text> </Text> : null}
       {detailBlock}
+    </Box>
+  )
+}
+
+// The settings pane: one button a row, its digit pressing it while the pane holds
+// the keys. A toggle shows [x] or [ ]; a choice shows its value and moves to the next
+async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
+  const { rows, error } = await read($, settings)
+  return (
+    <Box flexDirection="column">
+      {rows.length === 0 ? <Text color={MUTED}>No settings to show.</Text> : null}
+      {rows.map((row, i) => (
+        <Box flexDirection="row" columnGap={1}>
+          <Button
+            key={`set:${row.key}`}
+            label={typeof row.value === 'boolean' ? `${row.value ? '[x]' : '[ ]'} ${row.label}` : `${row.label}: ${String(row.value)}`}
+            plain
+            {...(i < 9 ? { hotkey: String(i + 1) } : {})}
+            onPress={() => changeSetting($, row)}
+          />
+          {typeof row.value === 'boolean' ? null : <Text color={MUTED}>{`(press for ${String(nextValue(row))})`}</Text>}
+        </Box>
+      ))}
+      <Text> </Text>
+      {error ? <Text color={AMBER} wrap="wrap">{error}</Text> : null}
+      <Text color={MUTED} wrap="wrap">Saved to /config. Esc closes this pane.</Text>
     </Box>
   )
 }

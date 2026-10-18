@@ -44,6 +44,12 @@ export type SessionInfo = {
   growth: number[]
 }
 
+/** one of this mod's own /config rows, as the settings pane shows it */
+export type SettingRow = { key: string; label: string; value: boolean | string | number | readonly string[]; options?: readonly string[] }
+
+/** the settings pane: the mod's /config rows, and why the last change was refused */
+export type QuotaSettings = { rows: SettingRow[]; error: string | null }
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-quota': {
@@ -63,6 +69,7 @@ declare module 'claude-code' {
       /** bumped every second while the cache countdown shows: redraws it */
       cacheTick: number
       sessionInfo: SessionInfo
+      settings: QuotaSettings
     }
   }
 }

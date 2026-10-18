@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cacheLeft, lastTurnOf, modelName, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
+import { cacheLeft, lastTurnOf, modelName, nextValue, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
 const MIN = 60_000
@@ -265,4 +265,75 @@ test('switched to bottom in /config, the pane left open by the load before is cl
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
   await clock.advance(1)
   expect(calls).toEqual(['close usage-quota'])
+})
+
+// this mod's /config rows as the engine lists them; config.set writes into them, or
+// refuses with `deny` when one is given
+type Row = { key: string; label: string; value: boolean | string; options?: string[] }
+function configRows(on: On, rows: Row[], sets: string[], deny?: string) {
+  on('config.list', () => ({
+    value: rows.map(r => ({ ...r, kind: typeof r.value === 'boolean' ? 'boolean' : 'choice', provider: { plugin: 'usage-quota', tier: 'user' }, isLocked: false })),
+  }) as never)
+  on('config.set', (_$, e) => {
+    const { key, value } = e as unknown as { key: string; value: boolean | string }
+    sets.push(`${key}=${String(value)}`)
+    if (deny) return { deny } as never
+    rows.find(r => r.key === key)!.value = value
+    return { value } as never
+  })
+}
+const ROWS = (): Row[] => [
+  { key: 'usage-quota.placement', label: 'Placement', value: 'right', options: ['right', 'bottom'] },
+  { key: 'usage-quota.show_cache', label: 'Show cache countdown', value: true },
+]
+const SETTINGS_PANE = { component: 'Pane', requestId: 'usage-quota-settings' } as const
+
+test('a toggle flips, a choice moves to its next option', async () => {
+  expect(nextValue({ key: 'k', label: 'l', value: true })).toBe(false)
+  expect(nextValue({ key: 'k', label: 'l', value: 'right', options: ['right', 'bottom'] })).toBe('bottom')
+  expect(nextValue({ key: 'k', label: 'l', value: 'bottom', options: ['right', 'bottom'] })).toBe('right')
+})
+
+test('Settings in the pane opens the settings pane, with the keys', async ($, on) => {
+  const calls: string[] = []
+  world(on, null, calls)
+  configRows(on, ROWS(), [])
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await ui.press({ key: 'settings' })
+  expect(calls).toContain('open usage-quota-settings')
+  await ui.unmount()
+})
+
+test('each setting is a button: a press saves it through /config and the pane shows the new value', async ($, on) => {
+  const sets: string[] = []
+  world(on, null)
+  configRows(on, ROWS(), sets)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...SETTINGS_PANE, props: PROPS })
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
+  await ui.press({ key: 'set:usage-quota.show_cache' })
+  expect(sets).toEqual(['usage-quota.show_cache=false'])
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[ ] Show cache countdown')
+
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.placement' }))?.props.label).toBe('Placement: right')
+  expect(await ui.find({ type: 'Text', text: '(press for bottom)' })).toBeDefined()
+  await ui.press({ key: 'set:usage-quota.placement' })
+  expect(sets).toEqual(['usage-quota.show_cache=false', 'usage-quota.placement=bottom'])
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.placement' }))?.props.label).toBe('Placement: bottom')
+  // the digits press them, in order
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.placement' }))?.props.hotkey).toBe('1')
+  await ui.unmount()
+})
+
+test('a change /config refuses is left as it was, and the pane says why', async ($, on) => {
+  const sets: string[] = []
+  world(on, null)
+  configRows(on, ROWS(), sets, 'set by your organization')
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...SETTINGS_PANE, props: PROPS })
+  await ui.press({ key: 'set:usage-quota.show_cache' })
+  expect(await ui.find({ type: 'Text', text: 'Show cache countdown: set by your organization' })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
+  await ui.unmount()
 })
