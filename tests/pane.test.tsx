@@ -388,7 +388,7 @@ test('the band starts with a rule across its width, so the transcript above ends
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
   const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
   const first = (await band.findAll({ type: 'Text' }))[0]
-  expect(first?.text).toBe('─'.repeat(BAND_PROPS.bodyColumns))
+  expect(first?.text).toMatch(/^─+$/)
   // the headline right under it, no blank line between
   const rule = await band.find({ type: 'Box', text: /^─+$/ })
   expect(rule).toBeDefined()
@@ -403,3 +403,27 @@ test('the right-side pane draws no rule', { options: { placement: 'right' } }, a
   expect(await pane.find({ type: 'Text', text: /^─+$/ })).toBeUndefined()
   await pane.unmount()
 })
+
+for (const where of [
+  { placement: 'bottom', target: BAND, props: BAND_PROPS },
+  { placement: 'right', target: PANE, props: PROPS },
+] as const) {
+  test(`the settings button is a gear at the top right, and the controls row has no Settings (${where.placement})`, { options: { placement: where.placement } }, async ($, on) => {
+    const calls: string[] = []
+    world(on, null, calls)
+    configRows(on, ROWS(), [])
+    on('ui.panes', () => ({ value: [] }) as never)
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+    const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...(where.target as typeof PANE), props: where.props as never })
+    const gear = await ui.find({ type: 'Button', key: 'settings' })
+    expect(gear?.props.label).toBe('⚙')
+    expect(gear?.props.hotkey).toBe('s')
+    const buttons = await ui.findAll({ type: 'Button' })
+    expect(buttons.map(b => b.props.label)).not.toContain('Settings')
+    // first in the drawing: the top row
+    expect(buttons[0]?.props.key).toBe('settings')
+    await ui.press({ key: 'settings' })
+    expect(calls).toContain('open usage-quota-settings')
+    await ui.unmount()
+  })
+}

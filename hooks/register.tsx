@@ -1381,7 +1381,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   // The header: the headline beside the controls when both fit, else the controls
   // on a row of their own beneath it
   // (the desktop's letters are narrower than its cells: about 0.8 of one)
-  const CONTROLS = 50
+  const CONTROLS = 40
   // in the band, the terminal draws its own hide control ([-]) over the top-right
   // corner: the first row keeps clear of it (a pane's close mark has a row of its own)
   const HOST_HIDE = isBand && !Svg ? 4 : 0
@@ -1452,7 +1452,6 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
       <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0}>
         <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
       </Box>
-      <Button key="settings" label="Settings" plain onPress={() => openSettings($)} />
       <Button
         key="collapse"
         label={collapsed ? '▲' : '▼'}
@@ -1765,14 +1764,25 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
     </Box>
   )
 
+  // The settings button, top right: in the band at the end of the rule, beside the
+  // engine's [-] (its five cells are outside the band's own); in the pane on a row
+  // of its own, under the frame's close mark, which the engine draws on its row
+  const settingsButton = <Button key="settings" label="⚙" plain hotkey="s" onPress={() => openSettings($)} />
   // in the band, a rule across the top: where the transcript above ends and the band
-  // begins. A row of box-drawing dashes clipped to one line (the desktop draws text
-  // narrower than a cell, so it gets more of them)
+  // begins. A row of box-drawing dashes clipped to the width less the button and its
+  // gap (the desktop draws text narrower than a cell, so it gets more of them)
   const topRule = isBand ? (
-    <Box height={1} overflow="hidden">
-      <Text color={MUTED}>{'─'.repeat(Svg ? Math.ceil(width * 1.5) : width)}</Text>
+    <Box flexDirection="row" height={1} columnGap={1}>
+      <Box width={Math.max(1, width - 2)} height={1} overflow="hidden">
+        <Text color={MUTED}>{'─'.repeat(Svg ? Math.ceil(width * 1.5) : width)}</Text>
+      </Box>
+      <Box flexShrink={0}>{settingsButton}</Box>
     </Box>
-  ) : null
+  ) : (
+    <Box flexDirection="row" justifyContent="flex-end">
+      {settingsButton}
+    </Box>
+  )
 
   return (
     <Box flexDirection="column">
