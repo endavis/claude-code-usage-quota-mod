@@ -1875,7 +1875,7 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
         <Text> </Text>
         <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod. Change these in a terminal with:</Text>
         <Text wrap="wrap">{CONFIGURE_COMMAND}</Text>
-        <Text color={MUTED} wrap="wrap">A new session picks them up. Esc closes this pane.</Text>
+        <Text color={MUTED} wrap="wrap">Changes apply right away. Esc closes this pane.</Text>
       </Box>
     )
   }

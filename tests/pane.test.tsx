@@ -351,6 +351,8 @@ test('with no rows of the mod in /config (the desktop app), the pane lists what 
   expect(await ui.find({ type: 'Text', text: '[x] Show plan limits' })).toBeDefined()
   expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(9)
   expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
+  // a change there reloads the mod with the new values, in this session too
+  expect(await ui.find({ type: 'Text', text: 'Changes apply right away. Esc closes this pane.' })).toBeDefined()
   expect(await ui.find({ type: 'Button' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'No settings to show.' })).toBeUndefined()
   expect(sets).toEqual([])
