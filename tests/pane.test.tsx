@@ -381,3 +381,21 @@ test('the right-side pane keeps its details in one block below, however wide', {
   expect(texts.indexOf('Cache')).toBeLessThan(texts.indexOf('Session'))
   await ui.unmount()
 })
+
+test('the band starts with a rule across its width, so the transcript above ends visibly; the pane has none', { options: { placement: 'bottom' } }, async ($, on) => {
+  world(on, null)
+  on('ui.panes', () => ({ value: [] }) as never)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
+  const first = (await band.findAll({ type: 'Text' }))[0]
+  expect(first?.text).toBe('─'.repeat(BAND_PROPS.bodyColumns))
+  await band.unmount()
+})
+
+test('the right-side pane draws no rule', { options: { placement: 'right' } }, async ($, on) => {
+  world(on, null)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  expect(await pane.find({ type: 'Text', text: /^─+$/ })).toBeUndefined()
+  await pane.unmount()
+})

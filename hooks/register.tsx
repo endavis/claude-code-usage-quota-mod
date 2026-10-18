@@ -1765,8 +1765,18 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
     </Box>
   )
 
+  // in the band, a rule across the top: where the transcript above ends and the band
+  // begins. A row of box-drawing dashes clipped to one line (the desktop draws text
+  // narrower than a cell, so it gets more of them)
+  const topRule = isBand ? (
+    <Box height={1} overflow="hidden" marginBottom={gap}>
+      <Text color={MUTED}>{'─'.repeat(Svg ? Math.ceil(width * 1.5) : width)}</Text>
+    </Box>
+  ) : null
+
   return (
     <Box flexDirection="column">
+      {topRule}
       {isHeadBeside ? (
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={gap} paddingRight={HOST_HIDE}>
           <Box flexShrink={1}>{headText}</Box>
