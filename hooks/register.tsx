@@ -1769,7 +1769,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   // begins. A row of box-drawing dashes clipped to one line (the desktop draws text
   // narrower than a cell, so it gets more of them)
   const topRule = isBand ? (
-    <Box height={1} overflow="hidden" marginBottom={gap}>
+    <Box height={1} overflow="hidden">
       <Text color={MUTED}>{'─'.repeat(Svg ? Math.ceil(width * 1.5) : width)}</Text>
     </Box>
   ) : null

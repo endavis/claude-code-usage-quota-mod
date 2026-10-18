@@ -389,6 +389,10 @@ test('the band starts with a rule across its width, so the transcript above ends
   const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
   const first = (await band.findAll({ type: 'Text' }))[0]
   expect(first?.text).toBe('─'.repeat(BAND_PROPS.bodyColumns))
+  // the headline right under it, no blank line between
+  const rule = await band.find({ type: 'Box', text: /^─+$/ })
+  expect(rule).toBeDefined()
+  expect(rule?.props.marginBottom).toBeUndefined()
   await band.unmount()
 })
 
