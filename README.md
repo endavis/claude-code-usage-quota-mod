@@ -1,6 +1,6 @@
 # Claude Code Usage Quota Mod with Auto Compact
 
-[![Version: v0.2.1](docs/badges/version-v0.2.1.svg)](https://github.com/anantraghunath/claude-code-usage-quota-mod/releases/latest) ![Auto compact: 30% default](docs/badges/auto-compact-v2.svg) ![Compact: one click](docs/badges/compact-v2.svg) ![5 Hour + Weekly: whole account](docs/badges/limits-v2.svg) ![Forecast: before reset](docs/badges/forecast-v2.svg) ![Works in: Desktop + Terminal](docs/badges/works-in-v2.svg) ![License: MIT](docs/badges/license-v2.svg)
+[![Version: v0.2.2](docs/badges/version-v0.2.2.svg)](https://github.com/anantraghunath/claude-code-usage-quota-mod/releases/latest) ![Auto compact: 30% default](docs/badges/auto-compact-v2.svg) ![Compact: one click](docs/badges/compact-v2.svg) ![5 Hour + Weekly: whole account](docs/badges/limits-v2.svg) ![Forecast: before reset](docs/badges/forecast-v2.svg) ![Works in: Desktop + Terminal](docs/badges/works-in-v2.svg) ![License: MIT](docs/badges/license-v2.svg)
 
 **Know your Claude limits before they hit you.** A live pane docked on the right of Claude Code that shows your plan limits, forecasts whether you'll run out before they reset, shows how full your context window is, and counts down until your prompt cache expires. **Compact in one click, or let it compact automatically.**
 
