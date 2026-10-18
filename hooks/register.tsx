@@ -1768,13 +1768,13 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   // engine's [-] (its five cells are outside the band's own); in the pane on a row
   // of its own, under the frame's close mark, which the engine draws on its row
   const settingsButton = <Button key="settings" label="⚙" plain hotkey="s" onPress={() => openSettings($)} />
-  // in the band, a rule across the top: where the transcript above ends and the band
-  // begins. A row of box-drawing dashes clipped to the width less the button and its
-  // gap (the desktop draws text narrower than a cell, so it gets more of them)
-  const topRule = isBand ? (
+  // in the terminal's band, a rule across the top: where the transcript above ends and
+  // the band begins. A row of box-drawing dashes clipped to the width less the button
+  // and its gap. The desktop sets the band apart itself, so there it has none
+  const topRule = isBand && e.surface !== 'desktop' ? (
     <Box flexDirection="row" height={1} columnGap={1}>
       <Box width={Math.max(1, width - 2)} height={1} overflow="hidden">
-        <Text color={MUTED}>{'─'.repeat(Svg ? Math.ceil(width * 1.5) : width)}</Text>
+        <Text color={MUTED}>{'─'.repeat(width)}</Text>
       </Box>
       <Box flexShrink={0}>{settingsButton}</Box>
     </Box>

@@ -396,6 +396,16 @@ test('the band starts with a rule across its width, so the transcript above ends
   await band.unmount()
 })
 
+test('the desktop band draws no rule, and keeps the gear at the top right', { options: { placement: 'bottom' } }, async ($, on) => {
+  world(on, null)
+  on('ui.panes', () => ({ value: [] }) as never)
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', ...BAND, props: BAND_PROPS })
+  expect(await band.find({ type: 'Text', text: /^─+$/ })).toBeUndefined()
+  expect((await band.find({ type: 'Button', key: 'settings' }))?.props.label).toBe('⚙')
+  await band.unmount()
+})
+
 test('the right-side pane draws no rule', { options: { placement: 'right' } }, async ($, on) => {
   world(on, null)
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
