@@ -17,7 +17,7 @@ const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as
 const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', waits: false, stuck: false } as Hold)
 const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
-const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null } as QuotaSettings)
+const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -1059,6 +1059,29 @@ export function readPlacement(options: PluginOptions): Placement {
   return options.placement === 'bottom' ? 'bottom' : 'right'
 }
 let placement: Placement = 'right'
+// the values this load was given, for a settings pane with no /config rows to list
+let given: PluginOptions = {}
+
+// This mod's userConfig fields, as plugin.json declares them: the settings pane
+// lists these where /config has no rows for the mod (the desktop app's /config is
+// its own settings window, without them), read only, with the command that sets them
+const FIELDS: readonly { field: string; label: string; options?: readonly string[] }[] = [
+  { field: 'placement', label: 'Placement', options: ['right', 'bottom'] },
+  { field: 'show_limits', label: 'Show plan limits' },
+  { field: 'show_context', label: 'Show context window' },
+  { field: 'show_compact_forecast', label: 'Show turns until compact' },
+  { field: 'show_cache', label: 'Show cache countdown' },
+  { field: 'show_cache_hits', label: 'Show cache hit rate' },
+  { field: 'show_session', label: 'Show session cost' },
+  { field: 'show_last_turn', label: 'Show last turn' },
+  { field: 'show_agents', label: 'Show running agents' },
+]
+export const CONFIGURE_COMMAND = 'claude plugin configure usage-quota@claude-code-usage-quota-mod'
+export function givenRows(options: PluginOptions): SettingRow[] {
+  return FIELDS.map(({ field, label, options: choices }) => choices
+    ? { key: `usage-quota.${field}`, label, value: readPlacement(options), options: choices }
+    : { key: `usage-quota.${field}`, label, value: options[field] !== false })
+}
 
 // the turn's usage, as the API reported it: what it wrote and how much of its input
 // the cache served (read over everything the requests were sent)
@@ -1127,7 +1150,9 @@ async function loadSettings($: EngineInterface): Promise<void> {
     const rows: SettingRow[] = (await $.config.list())
       .filter(row => row.key.startsWith('usage-quota.'))
       .map(row => ({ key: row.key, label: row.label, value: row.value, ...(row.options ? { options: row.options } : {}) }))
-    await update($, settings, s => ({ ...s, rows }))
+    // no rows of ours in /config (the desktop app): what this load was given, read only
+    const isReadOnly = rows.length === 0
+    await update($, settings, s => ({ ...s, rows: isReadOnly ? givenRows(given) : rows, isReadOnly }))
   } catch (error) {
     await update($, settings, s => ({ ...s, error: `settings not read: ${error instanceof Error ? error.message : String(error)}` }))
   }
@@ -1167,6 +1192,7 @@ async function closePane($: EngineInterface): Promise<void> {
 export const register: Register = (on, options) => {
   show = readShow(options)
   placement = readPlacement(options)
+  given = options
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'quota', description: 'Toggle Claude Code Usage Quota' })
@@ -1839,7 +1865,20 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
 async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
   const { Box, Text, Button } = $.ui.resolve(e)
   usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
-  const { rows, error } = await read($, settings)
+  const { rows, error, isReadOnly } = await read($, settings)
+  const valueOf = (row: SettingRow) =>
+    typeof row.value === 'boolean' ? `${row.value ? '[x]' : '[ ]'} ${row.label}` : `${row.label}: ${String(row.value)}`
+  if (isReadOnly) {
+    return (
+      <Box flexDirection="column">
+        {rows.map(row => <Text>{valueOf(row)}</Text>)}
+        <Text> </Text>
+        <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod. Change these in a terminal with:</Text>
+        <Text wrap="wrap">{CONFIGURE_COMMAND}</Text>
+        <Text color={MUTED} wrap="wrap">A new session picks them up. Esc closes this pane.</Text>
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column">
       {rows.length === 0 ? <Text color={MUTED}>No settings to show.</Text> : null}
@@ -1847,7 +1886,7 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
         <Box flexDirection="row" columnGap={1}>
           <Button
             key={`set:${row.key}`}
-            label={typeof row.value === 'boolean' ? `${row.value ? '[x]' : '[ ]'} ${row.label}` : `${row.label}: ${String(row.value)}`}
+            label={valueOf(row)}
             plain
             {...(i < 9 ? { hotkey: String(i + 1) } : {})}
             onPress={() => changeSetting($, row)}

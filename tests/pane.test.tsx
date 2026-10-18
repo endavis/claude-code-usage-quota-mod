@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cacheLeft, lastTurnOf, modelName, nextValue, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
+import { CONFIGURE_COMMAND, cacheLeft, givenRows, lastTurnOf, modelName, nextValue, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
 const MIN = 60_000
@@ -336,6 +336,40 @@ test('a change /config refuses is left as it was, and the pane says why', async 
   expect(await ui.find({ type: 'Text', text: 'Show cache countdown: set by your organization' })).toBeDefined()
   expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
   await ui.unmount()
+})
+
+test('with no rows of the mod in /config (the desktop app), the pane lists what this load was given, read only, and the command that sets them', { options: { placement: 'bottom', show_cache: false } }, async ($, on) => {
+  const sets: string[] = []
+  const clock = world(on, null)
+  configRows(on, [], sets)
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  // the settings are read as the session starts: let that finish
+  await clock.advance(100)
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', ...SETTINGS_PANE, props: PROPS })
+  expect(await ui.find({ type: 'Text', text: 'Placement: bottom' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[ ] Show cache countdown' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '[x] Show plan limits' })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(9)
+  expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'No settings to show.' })).toBeUndefined()
+  expect(sets).toEqual([])
+  await ui.unmount()
+})
+
+test('the read-only list names every userConfig field, with its title', async () => {
+  const labels = givenRows({}).map(row => `${row.key}=${row.label}`)
+  expect(labels).toEqual([
+    'usage-quota.placement=Placement',
+    'usage-quota.show_limits=Show plan limits',
+    'usage-quota.show_context=Show context window',
+    'usage-quota.show_compact_forecast=Show turns until compact',
+    'usage-quota.show_cache=Show cache countdown',
+    'usage-quota.show_cache_hits=Show cache hit rate',
+    'usage-quota.show_session=Show session cost',
+    'usage-quota.show_last_turn=Show last turn',
+    'usage-quota.show_agents=Show running agents',
+  ])
 })
 
 test('in a wide band the details join the two columns: Session and Last turn under the limits, Cache and Compact under the context', { options: { placement: 'bottom' } }, async ($, on) => {
