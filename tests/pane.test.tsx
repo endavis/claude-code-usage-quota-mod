@@ -337,3 +337,47 @@ test('a change /config refuses is left as it was, and the pane says why', async 
   expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
   await ui.unmount()
 })
+
+test('in a wide band the details join the two columns: Session and Last turn under the limits, Cache and Compact under the context', { options: { placement: 'bottom' } }, async ($, on) => {
+  const live: Live = { tokens: 40_000, costUsd: 1, turns: 2, agents: [{ name: 'Explore', type: 'Explore', description: 'find it', status: 'running' }] }
+  const clock = world(on, `${FIVE_MIN}\n`, [], [], live)
+  on('ui.panes', () => ({ value: [] }) as never)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const wide = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: { ...BAND_PROPS, bodyColumns: 100 } })
+  await $.turn.complete(TURN_WITH_USAGE)
+  live.tokens = 60_000
+  await $.turn.complete(TURN_WITH_USAGE)
+  await clock.advance(3_000)
+  // the left column is drawn first, then the right; Agents spans both, below them
+  const at = async (ui: typeof wide) => {
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    return (name: string) => texts.indexOf(name)
+  }
+  let pos = await at(wide)
+  for (const name of ['Weekly', 'Session', 'Last turn', 'Context', 'Cache', 'Compact', 'Agents']) expect(pos(name)).toBeGreaterThan(-1)
+  expect(pos('Weekly')).toBeLessThan(pos('Session'))
+  expect(pos('Last turn')).toBeLessThan(pos('Context'))
+  expect(pos('Context')).toBeLessThan(pos('Cache'))
+  expect(pos('Compact')).toBeLessThan(pos('Agents'))
+  await wide.unmount()
+
+  // too narrow for two columns: one block of details under the context, as in the pane
+  const narrow = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
+  pos = await at(narrow)
+  expect(pos('Context')).toBeLessThan(pos('Cache'))
+  expect(pos('Cache')).toBeLessThan(pos('Session'))
+  await narrow.unmount()
+})
+
+test('the right-side pane keeps its details in one block below, however wide', { options: { placement: 'right' } }, async ($, on) => {
+  const live: Live = { tokens: 40_000, costUsd: 1, turns: 2, agents: [] }
+  const clock = world(on, `${FIVE_MIN}\n`, [], [], live)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: { ...PROPS, bodyColumns: 100 } })
+  await $.turn.complete(TURN_WITH_USAGE)
+  await clock.advance(3_000)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.indexOf('Context')).toBeLessThan(texts.indexOf('Cache'))
+  expect(texts.indexOf('Cache')).toBeLessThan(texts.indexOf('Session'))
+  await ui.unmount()
+})

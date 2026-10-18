@@ -1515,51 +1515,6 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
       return runs
     }, [])
 
-  const limitsBlock = (
-    <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
-      {limits.length === 0 ? <Text color={MUTED} wrap="wrap">Usage limits show after the first reply.</Text> : null}
-      {stale ? <Text color={AMBER} wrap="wrap">{stale}</Text> : null}
-      {limits.map((f, i) => {
-        // held together when the note wraps: "resets in 2d 20h" moves down whole,
-        // never leaving "20h" alone on the next line
-        const left = `resets in ${duration(f.resetsAt - now)}`.replace(/ /g, NB)
-        const note =
-          f.status === 'idle'
-            ? 'starts with your next message'
-            : f.status === 'out'
-              ? `Limit will hit in ${duration(f.runOutAt - now)} – ${left}`
-              : f.status === 'hit'
-                ? `Limit reached – ${left}`
-                : `On pace for about ${Math.round(Math.min(100, f.projected))}% by reset – ${left}`
-        return (
-          <Box flexDirection="column">
-            <Box flexDirection="row">
-              <Box width={8} flexShrink={0}>
-                <Text bold wrap="truncate-end">{f.label}</Text>
-              </Box>
-              {bar(`${f.label} ${Math.round(f.percent)}% used`, limitSegments(f), cells, markerOf(f), f)}
-              <Box marginLeft={2} flexShrink={0}>
-                <Text bold color={ink(f.color)}>{`${Math.round(f.percent)}%`}</Text>
-              </Box>
-            </Box>
-            <Text color={MUTED} wrap="wrap">{note}</Text>
-            {/* a whole blank line, not a margin: the desktop draws margins shorter
-                than a line, which put Weekly out of step with the right column */}
-            {i < limits.length - 1 ? <Text> </Text> : null}
-          </Box>
-        )
-      })}
-    </Box>
-  )
-
-  const usedText = <Text bold color={ink(fillColor(snap.percent))}>{`${Math.round(snap.percent)}% used`}</Text>
-  const freeText = <Text color={MUTED}>{`${tokens(free)} free of ${tokens(snap.window)}`}</Text>
-  const contextName = (
-    <Box flexDirection="row">
-      <Text bold>Context</Text>
-      <Box marginLeft={2}>{usedText}</Box>
-    </Box>
-  )
   // the prompt cache: how long until the next message re-sends the whole context
   // uncached. The lifetime is the transcript's; until it is read, 5 minutes is
   // assumed (the shorter one), and the line says so
@@ -1631,8 +1586,63 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
         ))
       : null
-  const details = [cacheLine, forecastLine, sessionLine, lastLine, agentsLine].filter(row => row !== null)
+  // In the band, where the limits and the context stand side by side, the details
+  // join their columns: Session and Last turn under the limits, Cache and Compact
+  // under the context. Agents, and every row elsewhere, go in one block below
+  const inColumns = isBand && isSplit
+  const underLimits = inColumns ? [sessionLine, lastLine].filter(row => row !== null) : []
+  const underContext = inColumns ? [cacheLine, forecastLine].filter(row => row !== null) : []
+  // a whole blank line above, not a margin: the desktop draws margins shorter than a line
+  const columnRows = (rows: typeof underLimits) => (rows.length > 0 ? <Box flexDirection="column"><Text> </Text>{rows}</Box> : null)
+  const details = (inColumns ? [agentsLine] : [cacheLine, forecastLine, sessionLine, lastLine, agentsLine]).filter(row => row !== null)
   const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
+
+  const limitsBlock = (
+    <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
+      {limits.length === 0 ? <Text color={MUTED} wrap="wrap">Usage limits show after the first reply.</Text> : null}
+      {stale ? <Text color={AMBER} wrap="wrap">{stale}</Text> : null}
+      {limits.map((f, i) => {
+        // held together when the note wraps: "resets in 2d 20h" moves down whole,
+        // never leaving "20h" alone on the next line
+        const left = `resets in ${duration(f.resetsAt - now)}`.replace(/ /g, NB)
+        const note =
+          f.status === 'idle'
+            ? 'starts with your next message'
+            : f.status === 'out'
+              ? `Limit will hit in ${duration(f.runOutAt - now)} – ${left}`
+              : f.status === 'hit'
+                ? `Limit reached – ${left}`
+                : `On pace for about ${Math.round(Math.min(100, f.projected))}% by reset – ${left}`
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row">
+              <Box width={8} flexShrink={0}>
+                <Text bold wrap="truncate-end">{f.label}</Text>
+              </Box>
+              {bar(`${f.label} ${Math.round(f.percent)}% used`, limitSegments(f), cells, markerOf(f), f)}
+              <Box marginLeft={2} flexShrink={0}>
+                <Text bold color={ink(f.color)}>{`${Math.round(f.percent)}%`}</Text>
+              </Box>
+            </Box>
+            <Text color={MUTED} wrap="wrap">{note}</Text>
+            {/* a whole blank line, not a margin: the desktop draws margins shorter
+                than a line, which put Weekly out of step with the right column */}
+            {i < limits.length - 1 ? <Text> </Text> : null}
+          </Box>
+        )
+      })}
+      {columnRows(underLimits)}
+    </Box>
+  )
+
+  const usedText = <Text bold color={ink(fillColor(snap.percent))}>{`${Math.round(snap.percent)}% used`}</Text>
+  const freeText = <Text color={MUTED}>{`${tokens(free)} free of ${tokens(snap.window)}`}</Text>
+  const contextName = (
+    <Box flexDirection="row">
+      <Text bold>Context</Text>
+      <Box marginLeft={2}>{usedText}</Box>
+    </Box>
+  )
 
   const contextBlock = (
     <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
@@ -1657,6 +1667,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
             <Text color={MUTED}>{tokens(c.tokens)}</Text>
           </Box>
         ))}
+      {columnRows(underContext)}
     </Box>
   )
 
