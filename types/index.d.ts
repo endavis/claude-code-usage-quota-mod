@@ -24,6 +24,26 @@ export type AutoCompact = { isOn: boolean; at: number | null }
 /** what holds auto compact back in a chat: an ask (or "after my next compact"), or a compaction that left it past the % */
 export type Hold = { chat: string; waits: boolean; stuck: boolean }
 
+/**
+ * the prompt cache: when the main thread's last request ended, the lifetime its
+ * entries were written with (as the transcript records it), and where the
+ * transcript is, so a reload can look again
+ */
+export type PromptCache = { lastAt: number | null; ttlMs: number | null; transcript: string | null }
+
+/** the last main-thread turn: how long it took, what it wrote, which model, and the share of its input the cache served */
+export type LastTurn = { durationMs: number; outputTokens: number; model: string; hitPct: number | null }
+
+/** the session beyond the context: its cost, its prompts, its last turn, the agents running, and the context at each turn's end */
+export type SessionInfo = {
+  costUsd: number | null
+  turns: number | null
+  last: LastTurn | null
+  agents: string[]
+  /** context tokens at the end of the newest main-thread turns, oldest first, since the last compaction */
+  growth: number[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-quota': {
@@ -39,6 +59,10 @@ declare module 'claude-code' {
       fieldText: string | null
       /** the desktop app's theme, as its settings (or the OS) have it */
       theme: 'dark' | 'light'
+      promptCache: PromptCache
+      /** bumped every second while the cache countdown shows: redraws it */
+      cacheTick: number
+      sessionInfo: SessionInfo
     }
   }
 }

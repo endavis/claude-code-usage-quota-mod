@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderChildren, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import type { AutoCompact, Category, Hold, Limit, PaceOf, Snapshot } from '../types'
+import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, SessionInfo, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -15,6 +15,14 @@ const autoAsk = atom({ plugin: 'usage-quota', key: 'autoAsk' } as const, null as
 // what holds auto compact back, and in which chat: kept in state so a reload (an
 // update, /reload-plugins) keeps it, where a module variable would start over
 const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', waits: false, stuck: false } as Hold)
+const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
+const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
+const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
+
+// drawn in a pane, which docks beside the transcript (on the right) in a wide
+// fullscreen terminal or a wide desktop panel, and sits above the prompt otherwise
+const PANE = 'usage-quota'
+const PANE_TITLE = 'Usage'
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -946,9 +954,166 @@ async function refresh($: EngineInterface, ask: Ask = 'no'): Promise<void> {
   }
 }
 
-export const register: Register = on => {
+// The prompt cache: every request the main thread sends reads or writes it, and each
+// entry lives for the lifetime it was written with (5 minutes, or 1 hour), counted
+// again from every request that reads it. The API's usage tells a mod how many
+// tokens were written but not for how long; the transcript's own rows do
+// (cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens).
+const TTL_5M = 5 * 60_000
+const TTL_1H = 60 * 60_000
+// the transcript's last rows: enough for the newest assistant row with usage
+const TAIL_BYTES = 256 * 1024
+const FS_READ_MAX = 4 * 1024 * 1024
+
+// the lifetime the newest row that wrote to the cache used, read from the transcript
+// text (JSON lines); null when no row in it wrote to the cache
+export function ttlFromTranscript(text: string): number | null {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
+    if (!line.includes('"cache_creation"')) continue
+    try {
+      const row = JSON.parse(line) as { isSidechain?: boolean; message?: { usage?: { cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } } } }
+      if (row.isSidechain) continue
+      const made = row.message?.usage?.cache_creation
+      if (!made) continue
+      if ((made.ephemeral_1h_input_tokens ?? 0) > 0) return TTL_1H
+      if ((made.ephemeral_5m_input_tokens ?? 0) > 0) return TTL_5M
+    } catch {
+      // the first line of a tail is usually cut mid-row
+    }
+  }
+  return null
+}
+
+async function readTail($: EngineInterface, path: string): Promise<string> {
+  const { size } = await $.fs.stat(path)
+  if (size <= FS_READ_MAX) return await $.fs.read(path)
+  // too large for one read: its last rows from tail (Linux, macOS)
+  const { stdout } = await $.process.run(['tail', '-c', String(TAIL_BYTES), path], { timeoutMs: 5_000 })
+  return stdout
+}
+
+// where Claude Code keeps this session's transcript: <config>/projects/<the
+// directory, each character other than a letter or digit as ->/<session id>.jsonl.
+// The Stop hook names it too, but settings hooks run only for an organization's
+// own plugins where one manages Claude Code; this finds it everywhere else
+export function transcriptPath(config: string, dir: string, sessionId: string): string {
+  return `${config}/projects/${dir.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`
+}
+
+async function findTranscript($: EngineInterface): Promise<string | null> {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? (home ? `${home}/.claude` : undefined)
+  if (!config) return null
+  const id = await $.session.id()
+  for (const dir of new Set([await $.session.cwd(), await $.session.root()])) {
+    const path = transcriptPath(config, dir, id)
+    if (await $.fs.exists(path)) return path
+  }
+  return null
+}
+
+async function detectTtl($: EngineInterface): Promise<void> {
+  try {
+    let cache = await read($, promptCache)
+    if (!cache.transcript) {
+      const found = await findTranscript($)
+      if (!found) return
+      await update($, promptCache, c => ({ ...c, transcript: found }))
+      cache = { ...cache, transcript: found }
+    }
+    const ttl = ttlFromTranscript(await readTail($, cache.transcript!))
+    if (ttl !== null && ttl !== cache.ttlMs) await update($, promptCache, c => ({ ...c, ttlMs: ttl }))
+  } catch (error) {
+    $.ui.log(`usage-quota: cache lifetime not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+// "expires in 4m 12s", to the second: the countdown is what the line is for
+export function cacheLeft(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
+// What the pane shows, each part a userConfig option (a row in /config; a change
+// there reloads the module with the new values). Every part is on unless set off.
+const SHOW_KEYS = ['limits', 'context', 'compact_forecast', 'cache', 'cache_hits', 'session', 'last_turn', 'agents'] as const
+type Show = Record<(typeof SHOW_KEYS)[number], boolean>
+export function readShow(options: PluginOptions): Show {
+  return Object.fromEntries(SHOW_KEYS.map(key => [key, options[`show_${key}`] !== false])) as Show
+}
+let show: Show = readShow({})
+
+// the turn's usage, as the API reported it: what it wrote and how much of its input
+// the cache served (read over everything the requests were sent)
+export function lastTurnOf(durationMs: number, usage: TurnUsage): LastTurn {
+  const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+  return {
+    durationMs,
+    outputTokens: usage.output_tokens,
+    model: usage.model,
+    hitPct: input > 0 ? Math.round((usage.cache_read_input_tokens / input) * 100) : null,
+  }
+}
+
+// "claude-opus-5-5" -> "opus-5-5", "claude-sonnet-4-5-20250929" -> "sonnet-4-5"
+export function modelName(id: string): string {
+  return id.replace(/^claude-/, '').replace(/-\d{8}$/, '').replace(/\[1m\]$/, '')
+}
+
+export function seconds(ms: number): string {
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
+
+// About how many more turns until the context is compacted, from its average growth
+// per turn since the last compaction: to the auto compact % when that is on, else to
+// where Claude Code compacts by itself (the free space, the buffer kept out of it).
+// null until two turns have grown it
+export function turnsUntilCompact(growth: number[], remaining: number): number | null {
+  const steps = growth.slice(1).map((tokens, i) => tokens - growth[i]!).filter(d => d > 0)
+  if (steps.length < 1) return null
+  const average = steps.reduce((sum, d) => sum + d, 0) / steps.length
+  return Math.max(0, Math.ceil(remaining / average))
+}
+
+// the context at the end of a main-thread turn: kept for the forecast, the newest 8;
+// a drop means a compaction (or /clear), which starts the count again
+export function pushGrowth(growth: number[], tokens: number): number[] {
+  const last = growth[growth.length - 1]
+  return last !== undefined && tokens < last ? [tokens] : [...growth, tokens].slice(-8)
+}
+
+// the session's cost, prompts and running agents, looked at every 3s; written only
+// when something changed, so an idle pane is not redrawn for nothing
+const RUNNING = new Set(['pending', 'running', 'waiting'])
+async function refreshSession($: EngineInterface): Promise<void> {
+  try {
+    const costUsd = show.session ? ((await $.session.usage()).cost?.usd ?? null) : null
+    const turns = show.session ? await $.session.turns() : null
+    const agents = show.agents
+      ? (await $.agent.list()).filter(a => RUNNING.has(a.status)).map(a => a.name ?? a.type ?? a.description)
+      : []
+    const info = await read($, sessionInfo)
+    if (info.costUsd !== costUsd || info.turns !== turns || JSON.stringify(info.agents) !== JSON.stringify(agents)) {
+      await update($, sessionInfo, i => ({ ...i, costUsd, turns, agents }))
+    }
+  } catch (error) {
+    $.ui.log(`usage-quota: session figures not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+export const register: Register = (on, options) => {
+  show = readShow(options)
+
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'quota', description: 'Toggle the Claude Code Usage Quota band above the prompt' })
+    await $.command.register({ name: 'quota', description: 'Toggle the Claude Code Usage Quota pane' })
     const result = await next(e)
     await migrateStore($)
     try {
@@ -967,10 +1132,25 @@ export const register: Register = on => {
     // keep it live, mid-turn included: what Claude Code already holds (the context and
     // the limits each reply carries), every 3s; timers stop when the module reloads
     $.clock.every(LOCAL_EVERY_MS, () => void refresh($))
+    $.clock.every(LOCAL_EVERY_MS, () => void refreshSession($))
+    void refreshSession($)
     $.clock.every(COLLAPSE_EVERY_MS, () => void syncCollapsed($))
     // whatever surface the session started on (a desktop chat may say none)
     await syncTheme($)
     $.clock.every(THEME_EVERY_MS, () => void syncTheme($))
+    // the cache countdown, to the second, while there is one to show
+    $.clock.every(1_000, async () => {
+      if ((await read($, promptCache)).lastAt !== null) await update($, cacheTick, n => n + 1)
+    })
+    // a reload keeps the transcript's path: look at the lifetime again
+    void detectTtl($)
+    // opened unasked: docked from 144 columns (110 once the person has opened it),
+    // waiting undrawn below that until /quota or a wider terminal
+    if (await read($, isOn)) {
+      void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(error =>
+        $.ui.log(`usage-quota: pane not opened: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }),
+      )
+    }
     return result
   })
 
@@ -981,12 +1161,12 @@ export const register: Register = on => {
   })
 
   // the focus leaving the % field sets what was typed in it
-  on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
+  on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (!e.element?.startsWith('autoAt')) await commitDraft($)
     return next(e)
   }).catch(($, e, next) => next(e)) // a draft that fails to set never holds the focus back
 
-  on('ui.press', { component: 'AbovePrompt' }, async ($, e, next) => {
+  on('ui.press', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     await commitDraft($)
     return next(e)
   })
@@ -1011,7 +1191,23 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    // a subagent's turn is its own cache and its own figures
+    const isMain = e.agentId === undefined
+    if (isMain) {
+      // the last request of the turn has just read or written the cache: its
+      // lifetime counts from now
+      const at = await $.clock.now()
+      await update($, promptCache, c => ({ ...c, lastAt: at }))
+      void detectTtl($)
+      const usage = e.usage
+      if (usage) await update($, sessionInfo, i => ({ ...i, last: lastTurnOf(e.durationMs, usage) }))
+    }
     await refresh($)
+    if (isMain) {
+      const tokens = (await read($, snapshot))?.tokens
+      if (tokens) await update($, sessionInfo, i => ({ ...i, growth: pushGrowth(i.growth, tokens) }))
+      void refreshSession($)
+    }
     // the first reply is done: whatever it used, the jump is behind it
     spikeFrom = undefined
     // the turn is over: auto compact may fire now, never mid-reply
@@ -1021,15 +1217,37 @@ export const register: Register = on => {
     return result
   })
 
+  // the Stop hook's input names the transcript, where the cache lifetime is recorded
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    if (e.transcript_path && e.transcript_path !== (await read($, promptCache)).transcript) {
+      await update($, promptCache, c => ({ ...c, transcript: e.transcript_path }))
+    }
+    void detectTtl($)
+    return result
+  }).catch(($, e, next) => next(e)) // only reads: never holds the Stop back
+
   on('command.run', { command: 'quota' }, async $ => {
     const now = !(await read($, isOn))
     await update($, isOn, () => now)
-    if (now) await refresh($, 'now')
+    if (now) {
+      await refresh($, 'now')
+      await $.ui.open({ id: PANE, title: PANE_TITLE })
+    } else {
+      await $.ui.close({ id: PANE })
+    }
     return { text: now ? 'Claude Code Usage Quota on.' : 'Claude Code Usage Quota off.' }
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
+  // the person closing the pane (its mark, ctrl+x x) turns it off: /quota reopens it
+  on('ui.close', async ($, e, next) => {
+    const result = await next(e)
+    if (e.id === PANE && e.origin.kind === 'person') await update($, isOn, () => false)
+    return result
+  }).catch(($, e, next) => next(e)) // a close is never held back by this
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!(await read($, isOn))) return next(e)
     const snap = await read($, snapshot)
     if (!snap) return next(e)
 
@@ -1042,7 +1260,7 @@ export const register: Register = on => {
     // both windows always, once there is any reading: one the reading lacks is not running
     const known = snap.limits.length === 0 ? [] : Object.keys(WINDOWS).map(kind => snap.limits.find(l => l.kind === kind) ?? { kind, percentUsed: 0 })
     const list = known.map(l => forecast(l, now, snap.pace?.[l.kind])).filter((f): f is Forecast => f !== null)
-    const head = headline(list, now)
+    const head = show.limits ? headline(list, now) : undefined
     // free as /context has it: the window less what is used and the autocompact buffer
     const buffer = snap.categories.find(c => c.kind === 'buffer')?.tokens ?? 0
     const free = Math.max(0, snap.window - snap.tokens - buffer)
@@ -1065,6 +1283,9 @@ export const register: Register = on => {
     const auto = await read($, autoCompact)
     const ask = await read($, autoAsk)
     const tick = await read($, fieldTick)
+    const cache = await read($, promptCache)
+    const info = await read($, sessionInfo)
+    await read($, cacheTick) // redrawn every second while the countdown shows
     const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
     const submitAt = (value: string) => commitAt($, value)
     const toggleAuto = () => {
@@ -1080,12 +1301,9 @@ export const register: Register = on => {
     // on a row of their own beneath it
     // (the desktop's letters are narrower than its cells: about 0.8 of one)
     const CONTROLS = 40
-    // the terminal draws its own hide control ([-]) over the band's top-right
-    // corner: the first row keeps clear of it
-    const HOST_HIDE = Svg ? 0 : 4
-    const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS + HOST_HIDE
+    const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS
     // the windows and the context side by side, or one above the other
-    const isSplit = width >= 84
+    const isSplit = width >= 84 && show.limits && show.context
     const column = isSplit ? Math.floor((width - 4) / 2) : width
     // the limit bars fill their column: less the label (8) and the % (2 + 4)
     const cells = Math.max(6, column - 14)
@@ -1257,6 +1475,80 @@ export const register: Register = on => {
         <Box marginLeft={2}>{usedText}</Box>
       </Box>
     )
+    // the prompt cache: how long until the next message re-sends the whole context
+    // uncached. The lifetime is the transcript's; until it is read, 5 minutes is
+    // assumed (the shorter one), and the line says so
+    const cacheTtl = cache.ttlMs ?? TTL_5M
+    const cacheLeftMs = cache.lastAt === null ? null : cache.lastAt + cacheTtl - now
+    const cacheNote =
+      isBusy
+        ? { text: 'warm – a reply is running', color: GREEN }
+        : cacheLeftMs === null
+          ? { text: 'starts with your next message', color: MUTED }
+          : cacheLeftMs > 0
+            ? { text: `expires in ${cacheLeft(cacheLeftMs)}${cache.ttlMs === null ? ' (5m assumed)' : ''}`, color: cacheLeftMs <= cacheTtl / 5 ? AMBER : GREEN }
+            : { text: `expired ${duration(-cacheLeftMs)} ago – the next message re-sends the context`, color: RED }
+    // one row of the details under the bars: a name in a column of its own, the
+    // figures beside it, wrapping under themselves when the pane is narrow
+    const DETAIL_CELLS = 10
+    const detailRow = (name: string, value: RenderChildren) => (
+      <Box flexDirection="row">
+        <Box width={DETAIL_CELLS} flexShrink={0}>
+          <Text bold>{name}</Text>
+        </Box>
+        <Box flexDirection="row" flexShrink={1} flexWrap="wrap">
+          {value}
+        </Box>
+      </Box>
+    )
+    const hits = show.cache_hits && info.last?.hitPct != null ? `${info.last.hitPct}% hit last turn` : undefined
+    const cacheLine =
+      show.cache || hits
+        ? detailRow('Cache', [
+            show.cache ? <Text color={ink(cacheNote.color)} wrap="wrap">{cacheNote.text}</Text> : null,
+            show.cache && hits ? <Text color={MUTED}>{' · '}</Text> : null,
+            hits ? <Text color={MUTED} wrap="wrap">{hits}</Text> : null,
+          ])
+        : null
+    // turns until compact: to the auto compact % when that is on, else to where
+    // Claude Code compacts by itself (no free space left)
+    const toCompact = auto.isOn ? Math.max(0, ((auto.at ?? AT_DEFAULT) / 100) * snap.window - snap.tokens) : free
+    const turnsLeft = show.compact_forecast ? turnsUntilCompact(info.growth, toCompact) : null
+    const forecastLine =
+      turnsLeft !== null
+        ? detailRow('Compact', (
+            <Text color={turnsLeft <= 2 ? AMBER : MUTED} wrap="wrap">
+              {turnsLeft === 0
+                ? 'due now'
+                : `in about ${turnsLeft} ${turnsLeft === 1 ? 'turn' : 'turns'}${auto.isOn ? ` (auto at ${auto.at ?? AT_DEFAULT}%)` : ''}`}
+            </Text>
+          ))
+        : null
+    const sessionLine =
+      show.session && (info.costUsd !== null || info.turns !== null)
+        ? detailRow('Session', (
+            <Text color={MUTED} wrap="wrap">
+              {[info.costUsd !== null ? `$${info.costUsd.toFixed(2)}` : null, info.turns !== null ? `${info.turns} ${info.turns === 1 ? 'prompt' : 'prompts'}` : null]
+                .filter(Boolean)
+                .join(' · ')}
+            </Text>
+          ))
+        : null
+    const lastLine =
+      show.last_turn && info.last
+        ? detailRow('Last turn', (
+            <Text color={MUTED} wrap="wrap">{`${seconds(info.last.durationMs)} · ${tokens(info.last.outputTokens)} out · ${modelName(info.last.model)}`}</Text>
+          ))
+        : null
+    const agentsLine =
+      show.agents && info.agents.length > 0
+        ? detailRow('Agents', (
+            <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
+          ))
+        : null
+    const details = [cacheLine, forecastLine, sessionLine, lastLine, agentsLine].filter(row => row !== null)
+    const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
+
     const contextBlock = (
       <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
         {bar(`Context ${Math.round(snap.percent)}% used`, contextSegments, column)}
@@ -1286,7 +1578,7 @@ export const register: Register = on => {
     // collapsed, the limits go by a short name and the time to their reset: "5H 1h 3m",
     // "W 2d 21h"; a window not running shows its whole length: "5H 5h", "W 7d"
     const compactItems = [
-      ...limits.map(f => ({
+      ...(show.limits ? limits : []).map(f => ({
         label: f.label,
         short: f.kind === 'five_hour' ? '5H' : f.kind === 'seven_day' ? 'W' : f.label,
         // not running yet: the whole window, the countdown it will start from (5h, 7d)
@@ -1295,7 +1587,9 @@ export const register: Register = on => {
         color: f.color, marker: markerOf(f), segments: limitSegments(f), f: f as Forecast | undefined,
       })),
       // Context with the whole window, as the limits have their time: 1M, 200k
-      { label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined },
+      ...(show.context
+        ? [{ label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined }]
+        : []),
     ]
     const nameOf = (item: (typeof compactItems)[number]) => (
       <Box flexDirection="row" columnGap={1} flexShrink={0}>
@@ -1316,8 +1610,8 @@ export const register: Register = on => {
     // between the slots: enough that a 100% never runs into the next name
     const GAP = 2
     const slotsWidth = compactItems.filter(item => item.f).reduce((sum, item) => sum + slotOf(item) + GAP, 0)
-    const contextItem = compactItems[compactItems.length - 1]!
-    const contextBar = Math.max(6, width - slotsWidth - nameLength(contextItem) - 1 - 1 - `${Math.round(contextItem.percent)}%`.length)
+    const contextItem = show.context ? compactItems[compactItems.length - 1] : undefined
+    const contextBar = contextItem ? Math.max(6, width - slotsWidth - nameLength(contextItem) - 1 - 1 - `${Math.round(contextItem.percent)}%`.length) : 6
     const collapsedBlock = isOneRow ? (
       <Box flexDirection="row" columnGap={GAP}>
         {compactItems.map(item => {
@@ -1378,13 +1672,13 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {isHeadBeside ? (
-          <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={gap} paddingRight={HOST_HIDE}>
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={gap}>
             <Box flexShrink={1}>{headText}</Box>
             {controls}
           </Box>
         ) : (
           <Box flexDirection="column" marginBottom={gap}>
-            <Box paddingRight={HOST_HIDE}>{headText}</Box>
+            <Box>{headText}</Box>
             <Box marginTop={gap}>{controls}</Box>
           </Box>
         )}
@@ -1404,7 +1698,7 @@ export const register: Register = on => {
         ) : null}
 
         {collapsed ? (
-          collapsedBlock
+          compactItems.length > 0 ? collapsedBlock : null
         ) : isSplit ? (
           <Box flexDirection="row" columnGap={4}>
             {limitsBlock}
@@ -1412,11 +1706,14 @@ export const register: Register = on => {
           </Box>
         ) : (
           <Box flexDirection="column">
-            {limitsBlock}
-            <Text> </Text>
-            {contextBlock}
+            {show.limits ? limitsBlock : null}
+            {show.limits && show.context ? <Text> </Text> : null}
+            {show.context ? contextBlock : null}
           </Box>
         )}
+
+        {detailBlock && (collapsed ? compactItems.length > 0 : show.limits || show.context) ? <Text> </Text> : null}
+        {detailBlock}
       </Box>
     )
   })

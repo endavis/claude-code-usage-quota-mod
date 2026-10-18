@@ -2,13 +2,25 @@
 
 [![Version: v0.1.6](docs/badges/version-v0.1.6.svg)](https://github.com/anantraghunath/claude-code-usage-quota-mod/releases/latest) ![Auto compact: 30% default](docs/badges/auto-compact-v2.svg) ![Compact: one click](docs/badges/compact-v2.svg) ![5 Hour + Weekly: whole account](docs/badges/limits-v2.svg) ![Forecast: before reset](docs/badges/forecast-v2.svg) ![Works in: Desktop + Terminal](docs/badges/works-in-v2.svg) ![License: MIT](docs/badges/license-v2.svg)
 
-**Know your Claude limits before they hit you.** A live band above the Claude Code prompt that shows your plan limits, forecasts whether you'll run out before they reset, and shows how full your context window is. **Compact in one click, or let it compact automatically.**
+**Know your Claude limits before they hit you.** A live pane docked on the right of Claude Code that shows your plan limits, forecasts whether you'll run out before they reset, shows how full your context window is, and counts down until your prompt cache expires. **Compact in one click, or let it compact automatically.**
 
-The 5 Hour and Weekly limits are **your whole Claude account's**, including what you use in Claude chat and Cowork. The band itself shows in **Claude Code**: the desktop app and the terminal.
+The 5 Hour and Weekly limits are **your whole Claude account's**, including what you use in Claude chat and Cowork. The pane itself shows in **Claude Code**: the desktop app and the terminal. It docks beside the transcript in a wide fullscreen terminal (from 110 columns once you've opened it with `/quota`, 144 before that) or a wide desktop panel, and sits above the prompt otherwise.
 
 **Live from the moment a session opens.** Many usage mods stay blank until Claude replies, because they only read the figures each reply carries. This one asks Anthropic's usage service straight away, for free (it uses no tokens and doesn't count toward your limits), so your limits are there as soon as the band appears, and it keeps them current every few seconds while you work.
 
-Type **`/quota`** to turn the band off and on.
+Type **`/quota`** to turn the pane off and on. Closing the pane turns it off too.
+
+**Cache countdown.** Each reply keeps Claude's prompt cache warm for a while: 5 minutes or 1 hour, depending on what Claude Code asked for. The **Cache** line shows how long until it expires (`expires in 54m 12s`), turns amber in the last fifth, and says when it has expired, meaning your next message will send the whole context again uncached. The lifetime is read from the session's transcript. Until it has been read, the line assumes 5 minutes and says so.
+
+**Session details.** Under the bars:
+
+- **Cache**: the countdown, and how much of the last turn's input the cache served (`96% hit last turn`). A low hit rate after a `/model` switch or an edited CLAUDE.md means the cache had to be written again.
+- **Compact**: about how many more turns until the context is compacted, from how fast it has grown since the last compaction: to your Auto compact % when that is on, else to where Claude Code compacts by itself.
+- **Session**: what the session has cost so far, as `/cost` totals it, and how many prompts it has had.
+- **Last turn**: how long it took, its output tokens and its model.
+- **Agents**: the subagents and teammates running right now.
+
+**Choose what shows.** Each part is a setting, on by default: open `/config` (or `/plugin configure usage-quota@claude-code-usage-quota-mod`) and turn off any of *Show plan limits*, *Show context window*, *Show turns until compact*, *Show cache countdown*, *Show cache hit rate*, *Show session cost*, *Show last turn* and *Show running agents*. Claude Code reloads the mod with the change.
 
 ## EXPANDED
 
@@ -90,7 +102,7 @@ Works in **light and dark** themes and at **every width** down to the narrowest.
 > [!NOTE]
 > In the desktop app, the band appears once a session has started. The brand-new *Welcome back* screen has no session yet, so no mod can draw there. Send your first message and it appears.
 
-In the terminal, **▲/▼** expands and collapses it. The `[-]` next to it is Claude Code's own control and hides the band; **ctrl+x ctrl+a** brings it back.
+In the terminal, **▲/▼** expands and collapses it. Claude Code's own close mark, or **ctrl+x x**, closes the pane; `/quota` brings it back.
 
 ![The band in the terminal, expanded](docs/terminal-expanded.png)
 
@@ -200,9 +212,9 @@ claude plugin marketplace remove claude-code-usage-quota-mod
 <summary>Exactly what it reads, sends and runs</summary>
 
 - **Network:** about every 2 minutes, one request to `https://api.anthropic.com/api/oauth/usage`, Anthropic's usage service, for your 5 Hour and Weekly limits. It goes through your existing Claude login: Claude Code attaches the credential, and the mod never sees it. That is the only host it contacts. The `www.w3.org` address in the code is only the namespace of the drawn bars' SVG images; nothing is sent there.
-- **Your session:** it reads the context size and the limits each reply carries, as Claude Code reports them. It doesn't read or send what you or Claude write.
-- **Commands:** it runs `/compact` when you press **Compact**, or when Auto compact reaches your %. It adds `/quota`, which turns the band off and on.
-- **Programs:** only to match your system's light or dark mode, when the desktop app follows the system: `reg query` for `AppsUseLightTheme` on Windows, `defaults read -g AppleInterfaceStyle` on macOS.
+- **Your session:** it reads the context size and the limits each reply carries, the session's cost and prompt count, each turn's duration, token counts and model, and the list of running agents, as Claude Code reports them. For the cache countdown it reads the end of this session's transcript file (`~/.claude/projects/…/<session>.jsonl`) and uses only each reply's `cache_creation` token counts; it doesn't keep or send anything else from it, or anything you or Claude write.
+- **Commands:** it runs `/compact` when you press **Compact**, or when Auto compact reaches your %. It adds `/quota`, which turns the pane off and on.
+- **Programs:** to match your system's light or dark mode, when the desktop app follows the system: `reg query` for `AppsUseLightTheme` on Windows, `defaults read -g AppleInterfaceStyle` on macOS. And `tail -c 262144` on the transcript when it is over 4 MB, for the cache countdown.
 - **Files:** it reads the desktop app's `config.json` for its theme setting. Once, after the v0.1.5 rename, it copies the old plugin's saved settings from `~/.claude/plugins/store`.
 - **Hooks:** the band's own clicks and focus (`ui.press`, `ui.focus`) and edits to the prompt (`prompt.edit`) only set a % you typed in the band, then pass on unchanged. Turns starting and ending tell it when a reply is running, so Auto compact never interrupts one.
 
