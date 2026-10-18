@@ -10,6 +10,8 @@ The 5 Hour and Weekly limits are **your whole Claude account's**, including what
 
 Type **`/quota`** to turn the pane off and on. Closing the pane turns it off too.
 
+**Right or bottom.** The *Placement* setting in `/config` picks where it draws: **right** (the default), the pane described above, or **bottom**, the band above the prompt. Both show the same parts. A mod can't draw on the left or at the top: Claude Code docks panes only on the right, and has no site above the transcript.
+
 **Cache countdown.** Each reply keeps Claude's prompt cache warm for a while: 5 minutes or 1 hour, depending on what Claude Code asked for. The **Cache** line shows how long until it expires (`expires in 54m 12s`), turns amber in the last fifth, and says when it has expired, meaning your next message will send the whole context again uncached. The lifetime is read from the session's transcript. Until it has been read, the line assumes 5 minutes and says so.
 
 **Session details.** Under the bars:

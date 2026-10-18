@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register, RenderChildren, SessionRateLimit, TurnUsage } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderChildren, RenderElement, RenderInput, SessionRateLimit, TurnUsage } from 'claude-code'
 
 import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, SessionInfo, Snapshot } from '../types'
 
@@ -19,8 +19,9 @@ const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const,
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 
-// drawn in a pane, which docks beside the transcript (on the right) in a wide
-// fullscreen terminal or a wide desktop panel, and sits above the prompt otherwise
+// drawn where the `placement` option says: `right`, a pane, which docks beside the
+// transcript in a wide fullscreen terminal or a wide desktop panel and sits above
+// the prompt otherwise; or `bottom`, the band above the prompt
 const PANE = 'usage-quota'
 const PANE_TITLE = 'Usage'
 
@@ -1049,6 +1050,11 @@ export function readShow(options: PluginOptions): Show {
   return Object.fromEntries(SHOW_KEYS.map(key => [key, options[`show_${key}`] !== false])) as Show
 }
 let show: Show = readShow({})
+export type Placement = 'right' | 'bottom'
+export function readPlacement(options: PluginOptions): Placement {
+  return options.placement === 'bottom' ? 'bottom' : 'right'
+}
+let placement: Placement = 'right'
 
 // the turn's usage, as the API reported it: what it wrote and how much of its input
 // the cache served (read over everything the requests were sent)
@@ -1109,11 +1115,20 @@ async function refreshSession($: EngineInterface): Promise<void> {
   }
 }
 
+async function closePane($: EngineInterface): Promise<void> {
+  try {
+    if ((await $.ui.panes()).some(pane => pane.id === PANE)) await $.ui.close({ id: PANE })
+  } catch (error) {
+    $.ui.log(`usage-quota: pane not closed: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
 export const register: Register = (on, options) => {
   show = readShow(options)
+  placement = readPlacement(options)
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'quota', description: 'Toggle the Claude Code Usage Quota pane' })
+    await $.command.register({ name: 'quota', description: 'Toggle Claude Code Usage Quota' })
     const result = await next(e)
     await migrateStore($)
     try {
@@ -1144,12 +1159,18 @@ export const register: Register = (on, options) => {
     })
     // a reload keeps the transcript's path: look at the lifetime again
     void detectTtl($)
-    // opened unasked: docked from 144 columns (110 once the person has opened it),
-    // waiting undrawn below that until /quota or a wider terminal
-    if (await read($, isOn)) {
-      void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(error =>
-        $.ui.log(`usage-quota: pane not opened: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }),
-      )
+    if (placement === 'right') {
+      // opened unasked: docked from 144 columns (110 once the person has opened it),
+      // waiting undrawn below that until /quota or a wider terminal
+      if (await read($, isOn)) {
+        void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(error =>
+          $.ui.log(`usage-quota: pane not opened: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }),
+        )
+      }
+    } else {
+      // switched to the band in /config: the pane a load before opened stays up
+      // across the reload, so close it
+      void closePane($)
     }
     return result
   })
@@ -1160,13 +1181,21 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  // the focus leaving the % field sets what was typed in it
+  // the focus leaving the % field sets what was typed in it; a press anywhere sets it too
   on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (!e.element?.startsWith('autoAt')) await commitDraft($)
     return next(e)
   }).catch(($, e, next) => next(e)) // a draft that fails to set never holds the focus back
+  on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!e.element?.startsWith('autoAt')) await commitDraft($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('ui.press', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    await commitDraft($)
+    return next(e)
+  })
+  on('ui.press', { component: 'AbovePrompt' }, async ($, e, next) => {
     await commitDraft($)
     return next(e)
   })
@@ -1230,11 +1259,11 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'quota' }, async $ => {
     const now = !(await read($, isOn))
     await update($, isOn, () => now)
-    if (now) {
-      await refresh($, 'now')
-      await $.ui.open({ id: PANE, title: PANE_TITLE })
-    } else {
-      await $.ui.close({ id: PANE })
+    if (now) await refresh($, 'now')
+    // the band follows isOn by itself; a pane is opened and closed
+    if (placement === 'right') {
+      if (now) await $.ui.open({ id: PANE, title: PANE_TITLE })
+      else await $.ui.close({ id: PANE })
     }
     return { text: now ? 'Claude Code Usage Quota on.' : 'Claude Code Usage Quota off.' }
   })
@@ -1246,475 +1275,485 @@ export const register: Register = (on, options) => {
     return result
   }).catch(($, e, next) => next(e)) // a close is never held back by this
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (!(await read($, isOn))) return next(e)
-    const snap = await read($, snapshot)
-    if (!snap) return next(e)
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
+}
 
-    const table = $.ui.resolve(e)
-    const { Box, Text, Button, Input } = table
-    const Svg = e.surface === 'desktop' && 'Svg' in table ? table.Svg : undefined
-    usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
-    const width = Math.max(20, e.props.bodyColumns)
-    const now = await $.clock.now()
-    // both windows always, once there is any reading: one the reading lacks is not running
-    const known = snap.limits.length === 0 ? [] : Object.keys(WINDOWS).map(kind => snap.limits.find(l => l.kind === kind) ?? { kind, percentUsed: 0 })
-    const list = known.map(l => forecast(l, now, snap.pace?.[l.kind])).filter((f): f is Forecast => f !== null)
-    const head = show.limits ? headline(list, now) : undefined
-    // free as /context has it: the window less what is used and the autocompact buffer
-    const buffer = snap.categories.find(c => c.kind === 'buffer')?.tokens ?? 0
-    const free = Math.max(0, snap.window - snap.tokens - buffer)
-    // highest first, as /context lists them: used categories, then the buffer, then free space
-    const rank = (c: Category) => (c.kind === 'used' ? 0 : c.kind === 'buffer' ? 1 : 2)
-    const shown = snap.categories
-      .map((c, i) => ({ ...c, color: colorOf(c, i) }))
-      .sort((a, b) => rank(a) - rank(b) || b.tokens - a.tokens)
+// One drawing for both sites, each drawn only while `placement` names it; null
+// hands the site on to the engine's own (nothing to show there)
+async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePrompt'>): Promise<RenderElement | null> {
+  const isBand = e.component === 'AbovePrompt'
+  if (isBand ? placement !== 'bottom' || e.props.hasSurvey : placement !== 'right') return null
+  if (!(await read($, isOn))) return null
+  const snap = await read($, snapshot)
+  if (!snap) return null
 
-    const limits = [...list].sort((a, b) => order(a.kind) - order(b.kind))
-    // say so when the figures are old: the service refused and no reply has come since
-    const age = snap.limitsAt === undefined ? 0 : now - snap.limitsAt
-    const stale =
-      snap.limitsError && age >= 2 * 60_000 && limits.length > 0
-        ? `usage check ${snap.limitsError} – figures from ${duration(age)} ago`
-        : snap.limitsError && limits.length === 0
-          ? `usage check ${snap.limitsError}`
-          : undefined
-    const collapsed = await read($, isCollapsed)
-    const auto = await read($, autoCompact)
-    const ask = await read($, autoAsk)
-    const tick = await read($, fieldTick)
-    const cache = await read($, promptCache)
-    const info = await read($, sessionInfo)
-    await read($, cacheTick) // redrawn every second while the countdown shows
-    const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
-    const submitAt = (value: string) => commitAt($, value)
-    const toggleAuto = () => {
-      const flipped = { isOn: !auto.isOn, at: auto.at ?? AT_DEFAULT }
-      void saveAuto($, flipped).then(() =>
-        flipped.isOn ? askIfPast($, flipped.at) : update($, autoAsk, () => null),
-      )
-    }
-    // Laid out to the width the chat gives the band, down to the desktop's narrowest
-    // chat: what fits side by side stays side by side; past that it stacks, and text
-    // wraps rather than cuts off.
-    // The header: the headline beside the controls when both fit, else the controls
-    // on a row of their own beneath it
-    // (the desktop's letters are narrower than its cells: about 0.8 of one)
-    const CONTROLS = 40
-    const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS
-    // the windows and the context side by side, or one above the other
-    const isSplit = width >= 84 && show.limits && show.context
-    const column = isSplit ? Math.floor((width - 4) / 2) : width
-    // the limit bars fill their column: less the label (8) and the % (2 + 4)
-    const cells = Math.max(6, column - 14)
-    // collapsed: the three bars in one row, or each on a row of its own
-    const isOneRow = width >= 72
-    // the context's two figures on one line, or the free count on the next
-    const isContextLine = column >= 38
-    // the question and its two answers on one line when they fit, else the answers
-    // beneath: measured from the words themselves (the desktop draws text narrower than
-    // a cell each, as the headline's check allows), each button's chrome and the gaps
-    const ASK_LABELS = ['Now', 'After my next compact']
-    const askWords = (ask ? `Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`.length : 0) + ASK_LABELS.join('').length
-    const isAskLine = width >= askWords * (Svg ? 0.8 : 1) + ASK_LABELS.length * (Svg ? 3 : 4) + 3
+  const table = $.ui.resolve(e)
+  const { Box, Text, Button, Input } = table
+  const Svg = e.surface === 'desktop' && 'Svg' in table ? table.Svg : undefined
+  usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
+  const width = Math.max(20, e.props.bodyColumns)
+  const now = await $.clock.now()
+  // both windows always, once there is any reading: one the reading lacks is not running
+  const known = snap.limits.length === 0 ? [] : Object.keys(WINDOWS).map(kind => snap.limits.find(l => l.kind === kind) ?? { kind, percentUsed: 0 })
+  const list = known.map(l => forecast(l, now, snap.pace?.[l.kind])).filter((f): f is Forecast => f !== null)
+  const head = show.limits ? headline(list, now) : undefined
+  // free as /context has it: the window less what is used and the autocompact buffer
+  const buffer = snap.categories.find(c => c.kind === 'buffer')?.tokens ?? 0
+  const free = Math.max(0, snap.window - snap.tokens - buffer)
+  // highest first, as /context lists them: used categories, then the buffer, then free space
+  const rank = (c: Category) => (c.kind === 'used' ? 0 : c.kind === 'buffer' ? 1 : 2)
+  const shown = snap.categories
+    .map((c, i) => ({ ...c, color: colorOf(c, i) }))
+    .sort((a, b) => rank(a) - rank(b) || b.tokens - a.tokens)
 
-    const controls = (
-      <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} flexWrap="wrap">
-        {/* auto compact: the switch (the press), its name, the % field beside it,
-            then a wide gap so the field reads as the switch's, not Compact's */}
-        {Svg ? (
-          <Box key="autoSwitch" width={SWITCH_CELLS} height={1} overflow="hidden">
-            {/* three layers, each the box's full size, so all share one centre: the
-                rounded light (unlit: an invisible border), the pill, the press */}
-            <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} borderStyle="round" borderColor={CLEAR} hover={{ backgroundColor: SWITCH_LIT, borderColor: SWITCH_LIT }} />
-            <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} alignItems="center" justifyContent="center">
-              <Svg alt={`Auto compact ${auto.isOn ? 'on' : 'off'}`} source={switchSvg(auto.isOn)} width={SWITCH_W} height={SWITCH_H} />
-            </Box>
-            {/* a chromeless button over all of it takes the click */}
-            <Box position="absolute" top={0} left={0}>
-              <Button key="auto" label={'   '} plain hover={{ backgroundColor: CLEAR }} onPress={toggleAuto} />
-            </Box>
-          </Box>
-        ) : (
-          <Button key="auto" label={auto.isOn ? '●' : '○'} plain onPress={toggleAuto} />
-        )}
-        <Text color={auto.isOn ? undefined : MUTED}>Auto compact</Text>
-        {auto.isOn ? (
-          // the field (3 digits) sets itself once typing pauses; a plain % right after it
-          <Box flexDirection="row" alignItems="center">
-            {/* the field's Enter chip can't be turned off: the field is drawn wider than
-                its box and the box clips the chip away */}
-            <Box width={4} overflow="hidden">
-              <Box width={6} flexShrink={0}>
-                <Input
-                  key={`autoAt${tick}`}
-                  value={drawnAt}
-                  submitLabel={'\u200b'}
-                  onInput={value => typedAt($, value)}
-                  onSubmit={value => submitAt(value)}
-                />
-              </Box>
-            </Box>
-            <Text color={MUTED}>%</Text>
-          </Box>
-        ) : Svg ? (
-          // off: the field's room is kept, unseen, so the switch sits at the very same
-          // spot and draws pixel for pixel as when on
-          <Box flexDirection="row" alignItems="center">
-            <Box width={4} />
-            <Text color={CLEAR}>%</Text>
-          </Box>
-        ) : null}
-        <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0}>
-          <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
-        </Box>
-        <Button
-          key="collapse"
-          label={collapsed ? '▲' : '▼'}
-          plain
-          onPress={async () => {
-            // from the state, not this closure's value (an older draw's); saved for
-            // the other chats first, so the half-second read never undoes the press
-            const now = !(await read($, isCollapsed))
-            await storeSet($, 'collapsed', now)
-            await update($, isCollapsed, () => now)
-          }}
-        />
-      </Box>
+  const limits = [...list].sort((a, b) => order(a.kind) - order(b.kind))
+  // say so when the figures are old: the service refused and no reply has come since
+  const age = snap.limitsAt === undefined ? 0 : now - snap.limitsAt
+  const stale =
+    snap.limitsError && age >= 2 * 60_000 && limits.length > 0
+      ? `usage check ${snap.limitsError} – figures from ${duration(age)} ago`
+      : snap.limitsError && limits.length === 0
+        ? `usage check ${snap.limitsError}`
+        : undefined
+  const collapsed = await read($, isCollapsed)
+  const auto = await read($, autoCompact)
+  const ask = await read($, autoAsk)
+  const tick = await read($, fieldTick)
+  const cache = await read($, promptCache)
+  const info = await read($, sessionInfo)
+  await read($, cacheTick) // redrawn every second while the countdown shows
+  const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
+  const submitAt = (value: string) => commitAt($, value)
+  const toggleAuto = () => {
+    const flipped = { isOn: !auto.isOn, at: auto.at ?? AT_DEFAULT }
+    void saveAuto($, flipped).then(() =>
+      flipped.isOn ? askIfPast($, flipped.at) : update($, autoAsk, () => null),
     )
-    const gap = Svg ? 0.5 : 1
-    const headText = <Text bold color={head ? ink(head.color) : MUTED} wrap="wrap">{head?.text ?? ' '}</Text>
+  }
+  // Laid out to the width the chat gives the band, down to the desktop's narrowest
+  // chat: what fits side by side stays side by side; past that it stacks, and text
+  // wraps rather than cuts off.
+  // The header: the headline beside the controls when both fit, else the controls
+  // on a row of their own beneath it
+  // (the desktop's letters are narrower than its cells: about 0.8 of one)
+  const CONTROLS = 40
+  // in the band, the terminal draws its own hide control ([-]) over the top-right
+  // corner: the first row keeps clear of it (a pane's close mark has a row of its own)
+  const HOST_HIDE = isBand && !Svg ? 4 : 0
+  const isHeadBeside = width >= (head?.text.length ?? 0) * (Svg ? 0.8 : 1) + CONTROLS + HOST_HIDE
+  // the windows and the context side by side, or one above the other
+  const isSplit = width >= 84 && show.limits && show.context
+  const column = isSplit ? Math.floor((width - 4) / 2) : width
+  // the limit bars fill their column: less the label (8) and the % (2 + 4)
+  const cells = Math.max(6, column - 14)
+  // collapsed: the three bars in one row, or each on a row of its own
+  const isOneRow = width >= 72
+  // the context's two figures on one line, or the free count on the next
+  const isContextLine = column >= 38
+  // the question and its two answers on one line when they fit, else the answers
+  // beneath: measured from the words themselves (the desktop draws text narrower than
+  // a cell each, as the headline's check allows), each button's chrome and the gaps
+  const ASK_LABELS = ['Now', 'After my next compact']
+  const askWords = (ask ? `Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`.length : 0) + ASK_LABELS.join('').length
+  const isAskLine = width >= askWords * (Svg ? 0.8 : 1) + ASK_LABELS.length * (Svg ? 3 : 4) + 3
 
-    // one bar: an Svg on the desktop, coloured cells on the terminal
-    const bar = (alt: string, segments: { color: string; share: number }[], barCells: number, marker?: number, f?: Forecast) =>
-      Svg ? (
-        <Box width={barCells} height={1} alignItems="center">
-          <Svg alt={alt} source={barSvg(segments, barCells * 8, marker)} height={BAR_PX} />
-        </Box>
-      ) : f ? (
-        <Box flexDirection="row" width={barCells}>
-          {cellRuns(f, barCells).map(run => (
-            <Box width={run.width} backgroundColor={run.color}>
-              <Text> </Text>
-            </Box>
-          ))}
+  const controls = (
+    <Box flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} flexWrap="wrap">
+      {/* auto compact: the switch (the press), its name, the % field beside it,
+          then a wide gap so the field reads as the switch's, not Compact's */}
+      {Svg ? (
+        <Box key="autoSwitch" width={SWITCH_CELLS} height={1} overflow="hidden">
+          {/* three layers, each the box's full size, so all share one centre: the
+              rounded light (unlit: an invisible border), the pill, the press */}
+          <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} borderStyle="round" borderColor={CLEAR} hover={{ backgroundColor: SWITCH_LIT, borderColor: SWITCH_LIT }} />
+          <Box position="absolute" top={0} left={0} width={SWITCH_CELLS} height={1} alignItems="center" justifyContent="center">
+            <Svg alt={`Auto compact ${auto.isOn ? 'on' : 'off'}`} source={switchSvg(auto.isOn)} width={SWITCH_W} height={SWITCH_H} />
+          </Box>
+          {/* a chromeless button over all of it takes the click */}
+          <Box position="absolute" top={0} left={0}>
+            <Button key="auto" label={'   '} plain hover={{ backgroundColor: CLEAR }} onPress={toggleAuto} />
+          </Box>
         </Box>
       ) : (
-        <Box flexDirection="row" width={barCells} overflow="hidden">
-          {segments.map(seg => {
-            const total = segments.reduce((sum, s) => sum + s.share, 0) || 1
-            return (
-              <Box backgroundColor={seg.color} flexGrow={Math.min(10000, Math.max(seg.share > 0 ? 1 : 0, Math.round((seg.share / total) * 1000)))} flexShrink={1}>
-                <Text> </Text>
-              </Box>
-            )
-          })}
-        </Box>
-      )
-    const limitSegments = (f: Forecast) => [
-      { color: f.color, share: Math.min(100, f.percent) },
-      { color: TRACK, share: Math.max(0, 100 - f.percent) },
-    ]
-    // the bar in three colours: Messages, Tools, and one light grey run for Other and
-    // the autocompact buffer together (drawn as one, no seam between them); then free.
-    // Always in that order, so Other sits against the buffer
-    const BAR_ORDER = ['Messages', 'Tools', 'Other']
-    const barRank = (c: (typeof shown)[number]) => (c.kind === 'used' ? Math.max(0, BAR_ORDER.indexOf(c.name)) : c.kind === 'buffer' ? 3 : 4)
-    const contextSegments = [...shown]
-      .sort((a, b) => barRank(a) - barRank(b))
-      .map(c => ({ color: c.name === 'Other' && c.kind === 'used' ? BUFFER : c.color, share: c.tokens }))
-      .reduce<Segment[]>((runs, seg) => {
-        const last = runs[runs.length - 1]
-        if (last && last.color === seg.color) last.share += seg.share
-        else runs.push({ ...seg })
-        return runs
-      }, [])
-
-    const limitsBlock = (
-      <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
-        {limits.length === 0 ? <Text color={MUTED} wrap="wrap">Usage limits show after the first reply.</Text> : null}
-        {stale ? <Text color={AMBER} wrap="wrap">{stale}</Text> : null}
-        {limits.map((f, i) => {
-          // held together when the note wraps: "resets in 2d 20h" moves down whole,
-          // never leaving "20h" alone on the next line
-          const left = `resets in ${duration(f.resetsAt - now)}`.replace(/ /g, NB)
-          const note =
-            f.status === 'idle'
-              ? 'starts with your next message'
-              : f.status === 'out'
-                ? `Limit will hit in ${duration(f.runOutAt - now)} – ${left}`
-                : f.status === 'hit'
-                  ? `Limit reached – ${left}`
-                  : `On pace for about ${Math.round(Math.min(100, f.projected))}% by reset – ${left}`
-          return (
-            <Box flexDirection="column">
-              <Box flexDirection="row">
-                <Box width={8} flexShrink={0}>
-                  <Text bold wrap="truncate-end">{f.label}</Text>
-                </Box>
-                {bar(`${f.label} ${Math.round(f.percent)}% used`, limitSegments(f), cells, markerOf(f), f)}
-                <Box marginLeft={2} flexShrink={0}>
-                  <Text bold color={ink(f.color)}>{`${Math.round(f.percent)}%`}</Text>
-                </Box>
-              </Box>
-              <Text color={MUTED} wrap="wrap">{note}</Text>
-              {/* a whole blank line, not a margin: the desktop draws margins shorter
-                  than a line, which put Weekly out of step with the right column */}
-              {i < limits.length - 1 ? <Text> </Text> : null}
+        <Button key="auto" label={auto.isOn ? '●' : '○'} plain onPress={toggleAuto} />
+      )}
+      <Text color={auto.isOn ? undefined : MUTED}>Auto compact</Text>
+      {auto.isOn ? (
+        // the field (3 digits) sets itself once typing pauses; a plain % right after it
+        <Box flexDirection="row" alignItems="center">
+          {/* the field's Enter chip can't be turned off: the field is drawn wider than
+              its box and the box clips the chip away */}
+          <Box width={4} overflow="hidden">
+            <Box width={6} flexShrink={0}>
+              <Input
+                key={`autoAt${tick}`}
+                value={drawnAt}
+                submitLabel={'\u200b'}
+                onInput={value => typedAt($, value)}
+                onSubmit={value => submitAt(value)}
+              />
             </Box>
-          )
-        })}
-      </Box>
-    )
-
-    const usedText = <Text bold color={ink(fillColor(snap.percent))}>{`${Math.round(snap.percent)}% used`}</Text>
-    const freeText = <Text color={MUTED}>{`${tokens(free)} free of ${tokens(snap.window)}`}</Text>
-    const contextName = (
-      <Box flexDirection="row">
-        <Text bold>Context</Text>
-        <Box marginLeft={2}>{usedText}</Box>
-      </Box>
-    )
-    // the prompt cache: how long until the next message re-sends the whole context
-    // uncached. The lifetime is the transcript's; until it is read, 5 minutes is
-    // assumed (the shorter one), and the line says so
-    const cacheTtl = cache.ttlMs ?? TTL_5M
-    const cacheLeftMs = cache.lastAt === null ? null : cache.lastAt + cacheTtl - now
-    const cacheNote =
-      isBusy
-        ? { text: 'warm – a reply is running', color: GREEN }
-        : cacheLeftMs === null
-          ? { text: 'starts with your next message', color: MUTED }
-          : cacheLeftMs > 0
-            ? { text: `expires in ${cacheLeft(cacheLeftMs)}${cache.ttlMs === null ? ' (5m assumed)' : ''}`, color: cacheLeftMs <= cacheTtl / 5 ? AMBER : GREEN }
-            : { text: `expired ${duration(-cacheLeftMs)} ago – the next message re-sends the context`, color: RED }
-    // one row of the details under the bars: a name in a column of its own, the
-    // figures beside it, wrapping under themselves when the pane is narrow
-    const DETAIL_CELLS = 10
-    const detailRow = (name: string, value: RenderChildren) => (
-      <Box flexDirection="row">
-        <Box width={DETAIL_CELLS} flexShrink={0}>
-          <Text bold>{name}</Text>
-        </Box>
-        <Box flexDirection="row" flexShrink={1} flexWrap="wrap">
-          {value}
-        </Box>
-      </Box>
-    )
-    const hits = show.cache_hits && info.last?.hitPct != null ? `${info.last.hitPct}% hit last turn` : undefined
-    const cacheLine =
-      show.cache || hits
-        ? detailRow('Cache', [
-            show.cache ? <Text color={ink(cacheNote.color)} wrap="wrap">{cacheNote.text}</Text> : null,
-            show.cache && hits ? <Text color={MUTED}>{' · '}</Text> : null,
-            hits ? <Text color={MUTED} wrap="wrap">{hits}</Text> : null,
-          ])
-        : null
-    // turns until compact: to the auto compact % when that is on, else to where
-    // Claude Code compacts by itself (no free space left)
-    const toCompact = auto.isOn ? Math.max(0, ((auto.at ?? AT_DEFAULT) / 100) * snap.window - snap.tokens) : free
-    const turnsLeft = show.compact_forecast ? turnsUntilCompact(info.growth, toCompact) : null
-    const forecastLine =
-      turnsLeft !== null
-        ? detailRow('Compact', (
-            <Text color={turnsLeft <= 2 ? AMBER : MUTED} wrap="wrap">
-              {turnsLeft === 0
-                ? 'due now'
-                : `in about ${turnsLeft} ${turnsLeft === 1 ? 'turn' : 'turns'}${auto.isOn ? ` (auto at ${auto.at ?? AT_DEFAULT}%)` : ''}`}
-            </Text>
-          ))
-        : null
-    const sessionLine =
-      show.session && (info.costUsd !== null || info.turns !== null)
-        ? detailRow('Session', (
-            <Text color={MUTED} wrap="wrap">
-              {[info.costUsd !== null ? `$${info.costUsd.toFixed(2)}` : null, info.turns !== null ? `${info.turns} ${info.turns === 1 ? 'prompt' : 'prompts'}` : null]
-                .filter(Boolean)
-                .join(' · ')}
-            </Text>
-          ))
-        : null
-    const lastLine =
-      show.last_turn && info.last
-        ? detailRow('Last turn', (
-            <Text color={MUTED} wrap="wrap">{`${seconds(info.last.durationMs)} · ${tokens(info.last.outputTokens)} out · ${modelName(info.last.model)}`}</Text>
-          ))
-        : null
-    const agentsLine =
-      show.agents && info.agents.length > 0
-        ? detailRow('Agents', (
-            <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
-          ))
-        : null
-    const details = [cacheLine, forecastLine, sessionLine, lastLine, agentsLine].filter(row => row !== null)
-    const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
-
-    const contextBlock = (
-      <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
-        {bar(`Context ${Math.round(snap.percent)}% used`, contextSegments, column)}
-        {isContextLine ? (
-          <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
-            {contextName}
-            {freeText}
           </Box>
-        ) : (
-          <Box flexDirection="column">
-            {contextName}
-            {freeText}
-          </Box>
-        )}
-        {(['Messages', 'Tools', 'Other'] as const)
-          .map(name => shown.find(c => c.name === name))
-          .filter((c): c is (typeof shown)[number] => c !== undefined)
-          .map(c => (
-            <Box flexDirection="row" justifyContent="space-between">
-              <Text color={c.color}>{c.name}</Text>
-              <Text color={MUTED}>{tokens(c.tokens)}</Text>
-            </Box>
-          ))}
+          <Text color={MUTED}>%</Text>
+        </Box>
+      ) : Svg ? (
+        // off: the field's room is kept, unseen, so the switch sits at the very same
+        // spot and draws pixel for pixel as when on
+        <Box flexDirection="row" alignItems="center">
+          <Box width={4} />
+          <Text color={CLEAR}>%</Text>
+        </Box>
+      ) : null}
+      <Box key="compactBox" marginLeft={isHeadBeside ? 2 : 0}>
+        <Button key="compact" label="Compact" hover={{ backgroundColor: COMPACT_LIT }} onPress={() => compactNow($)} />
       </Box>
-    )
+      <Button
+        key="collapse"
+        label={collapsed ? '▲' : '▼'}
+        plain
+        onPress={async () => {
+          // from the state, not this closure's value (an older draw's); saved for
+          // the other chats first, so the half-second read never undoes the press
+          const now = !(await read($, isCollapsed))
+          await storeSet($, 'collapsed', now)
+          await update($, isCollapsed, () => now)
+        }}
+      />
+    </Box>
+  )
+  const gap = Svg ? 0.5 : 1
+  const headText = <Text bold color={head ? ink(head.color) : MUTED} wrap="wrap">{head?.text ?? ' '}</Text>
 
-    // collapsed, the limits go by a short name and the time to their reset: "5H 1h 3m",
-    // "W 2d 21h"; a window not running shows its whole length: "5H 5h", "W 7d"
-    const compactItems = [
-      ...(show.limits ? limits : []).map(f => ({
-        label: f.label,
-        short: f.kind === 'five_hour' ? '5H' : f.kind === 'seven_day' ? 'W' : f.label,
-        // not running yet: the whole window, the countdown it will start from (5h, 7d)
-        until: f.status === 'idle' || !Number.isFinite(f.resetsAt) ? duration(WINDOWS[f.kind]?.ms ?? 0) : duration(f.resetsAt - now),
-        percent: f.percent,
-        color: f.color, marker: markerOf(f), segments: limitSegments(f), f: f as Forecast | undefined,
-      })),
-      // Context with the whole window, as the limits have their time: 1M, 200k
-      ...(show.context
-        ? [{ label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined }]
-        : []),
-    ]
-    const nameOf = (item: (typeof compactItems)[number]) => (
-      <Box flexDirection="row" columnGap={1} flexShrink={0}>
-        <Text bold>{item.short}</Text>
-        {item.until ? <Text color={MUTED}>{item.until}</Text> : null}
+  // one bar: an Svg on the desktop, coloured cells on the terminal
+  const bar = (alt: string, segments: { color: string; share: number }[], barCells: number, marker?: number, f?: Forecast) =>
+    Svg ? (
+      <Box width={barCells} height={1} alignItems="center">
+        <Svg alt={alt} source={barSvg(segments, barCells * 8, marker)} height={BAR_PX} />
       </Box>
-    )
-    const nameLength = (item: (typeof compactItems)[number]) => item.short.length + (item.until ? item.until.length + 1 : 0)
-    const third = Math.floor((width - 2 * 3) / 3)
-    // Collapsed, one row: each limit sits in a slot of fixed width, so W always starts at
-    // the same place: its name, room for the longest time ("4h 59m", "6d 23h"), its bar
-    // (one fixed width for both), room for "100%". A shorter time moves the bar left
-    // inside the slot, never the slot. Context takes all that is left, its % held to
-    // the right edge, its bar as wide as fits.
-    const TIME_CELLS = 6
-    const limitBar = Math.max(6, third - 'Weekly'.length - '100%'.length - 2)
-    const slotOf = (item: (typeof compactItems)[number]) => item.short.length + 1 + TIME_CELLS + 1 + limitBar + 1 + '100%'.length
-    // between the slots: enough that a 100% never runs into the next name
-    const GAP = 2
-    const slotsWidth = compactItems.filter(item => item.f).reduce((sum, item) => sum + slotOf(item) + GAP, 0)
-    const contextItem = show.context ? compactItems[compactItems.length - 1] : undefined
-    const contextBar = contextItem ? Math.max(6, width - slotsWidth - nameLength(contextItem) - 1 - 1 - `${Math.round(contextItem.percent)}%`.length) : 6
-    const collapsedBlock = isOneRow ? (
-      <Box flexDirection="row" columnGap={GAP}>
-        {compactItems.map(item => {
-          const pct = `${Math.round(item.percent)}%`
-          const isContext = item === contextItem
-          return (
-            <Box flexDirection="row" width={isContext ? undefined : slotOf(item)} flexGrow={isContext ? 1 : 0} flexShrink={isContext ? 1 : 0}>
-              <Box marginRight={1} flexShrink={0}>
-                {nameOf(item)}
-              </Box>
-              {isContext && Svg ? (
-                // on the desktop the bar stretches to fill what the row leaves, so the
-                // % lands at the right edge however wide the text draws
-                <Box flexGrow={1} flexShrink={1} height={1} alignItems="center">
-                  <Svg alt={`Context ${pct} used`} source={barSvg(item.segments, 4000)} height={BAR_PX} />
-                </Box>
-              ) : (
-                bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, isContext ? contextBar : limitBar, item.marker, item.f)
-              )}
-              <Box marginLeft={1} flexShrink={0} flexGrow={isContext && !Svg ? 1 : 0} justifyContent={isContext ? 'flex-end' : undefined}>
-                <Text bold color={ink(item.color)}>{pct}</Text>
-              </Box>
-            </Box>
-          )
-        })}
+    ) : f ? (
+      <Box flexDirection="row" width={barCells}>
+        {cellRuns(f, barCells).map(run => (
+          <Box width={run.width} backgroundColor={run.color}>
+            <Text> </Text>
+          </Box>
+        ))}
       </Box>
     ) : (
-      // each on a row of its own, the names in one column (as wide as the longest) and
-      // the %s in another
-      (() => {
-        const nameCells = Math.max(8, ...compactItems.map(item => nameLength(item) + 1))
-        return (
-          <Box flexDirection="column">
-            {compactItems.map(item => (
-              <Box flexDirection="row">
-                <Box width={nameCells} flexShrink={0}>
-                  {nameOf(item)}
-                </Box>
-                {bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, Math.max(6, width - nameCells - 6), item.marker, item.f)}
-                <Box marginLeft={2} flexShrink={0}>
-                  <Text bold color={ink(item.color)}>{`${Math.round(item.percent)}%`}</Text>
-                </Box>
-              </Box>
-            ))}
-          </Box>
-        )
-      })()
-    )
-
-    const askText = ask ? <Text color={AMBER} wrap="wrap">{`Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`}</Text> : null
-    const askButtons = (
-      <Box flexDirection="row" columnGap={1} flexWrap="wrap" flexShrink={0}>
-        <Button key="askNow" label="Now" onPress={() => void answerAsk($, 'now')} />
-        <Button key="askNext" label="After my next compact" onPress={() => void answerAsk($, 'next')} />
+      <Box flexDirection="row" width={barCells} overflow="hidden">
+        {segments.map(seg => {
+          const total = segments.reduce((sum, s) => sum + s.share, 0) || 1
+          return (
+            <Box backgroundColor={seg.color} flexGrow={Math.min(10000, Math.max(seg.share > 0 ? 1 : 0, Math.round((seg.share / total) * 1000)))} flexShrink={1}>
+              <Text> </Text>
+            </Box>
+          )
+        })}
       </Box>
     )
+  const limitSegments = (f: Forecast) => [
+    { color: f.color, share: Math.min(100, f.percent) },
+    { color: TRACK, share: Math.max(0, 100 - f.percent) },
+  ]
+  // the bar in three colours: Messages, Tools, and one light grey run for Other and
+  // the autocompact buffer together (drawn as one, no seam between them); then free.
+  // Always in that order, so Other sits against the buffer
+  const BAR_ORDER = ['Messages', 'Tools', 'Other']
+  const barRank = (c: (typeof shown)[number]) => (c.kind === 'used' ? Math.max(0, BAR_ORDER.indexOf(c.name)) : c.kind === 'buffer' ? 3 : 4)
+  const contextSegments = [...shown]
+    .sort((a, b) => barRank(a) - barRank(b))
+    .map(c => ({ color: c.name === 'Other' && c.kind === 'used' ? BUFFER : c.color, share: c.tokens }))
+    .reduce<Segment[]>((runs, seg) => {
+      const last = runs[runs.length - 1]
+      if (last && last.color === seg.color) last.share += seg.share
+      else runs.push({ ...seg })
+      return runs
+    }, [])
 
-    return (
-      <Box flexDirection="column">
-        {isHeadBeside ? (
-          <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={gap}>
-            <Box flexShrink={1}>{headText}</Box>
-            {controls}
+  const limitsBlock = (
+    <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
+      {limits.length === 0 ? <Text color={MUTED} wrap="wrap">Usage limits show after the first reply.</Text> : null}
+      {stale ? <Text color={AMBER} wrap="wrap">{stale}</Text> : null}
+      {limits.map((f, i) => {
+        // held together when the note wraps: "resets in 2d 20h" moves down whole,
+        // never leaving "20h" alone on the next line
+        const left = `resets in ${duration(f.resetsAt - now)}`.replace(/ /g, NB)
+        const note =
+          f.status === 'idle'
+            ? 'starts with your next message'
+            : f.status === 'out'
+              ? `Limit will hit in ${duration(f.runOutAt - now)} – ${left}`
+              : f.status === 'hit'
+                ? `Limit reached – ${left}`
+                : `On pace for about ${Math.round(Math.min(100, f.projected))}% by reset – ${left}`
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row">
+              <Box width={8} flexShrink={0}>
+                <Text bold wrap="truncate-end">{f.label}</Text>
+              </Box>
+              {bar(`${f.label} ${Math.round(f.percent)}% used`, limitSegments(f), cells, markerOf(f), f)}
+              <Box marginLeft={2} flexShrink={0}>
+                <Text bold color={ink(f.color)}>{`${Math.round(f.percent)}%`}</Text>
+              </Box>
+            </Box>
+            <Text color={MUTED} wrap="wrap">{note}</Text>
+            {/* a whole blank line, not a margin: the desktop draws margins shorter
+                than a line, which put Weekly out of step with the right column */}
+            {i < limits.length - 1 ? <Text> </Text> : null}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+
+  const usedText = <Text bold color={ink(fillColor(snap.percent))}>{`${Math.round(snap.percent)}% used`}</Text>
+  const freeText = <Text color={MUTED}>{`${tokens(free)} free of ${tokens(snap.window)}`}</Text>
+  const contextName = (
+    <Box flexDirection="row">
+      <Text bold>Context</Text>
+      <Box marginLeft={2}>{usedText}</Box>
+    </Box>
+  )
+  // the prompt cache: how long until the next message re-sends the whole context
+  // uncached. The lifetime is the transcript's; until it is read, 5 minutes is
+  // assumed (the shorter one), and the line says so
+  const cacheTtl = cache.ttlMs ?? TTL_5M
+  const cacheLeftMs = cache.lastAt === null ? null : cache.lastAt + cacheTtl - now
+  const cacheNote =
+    isBusy
+      ? { text: 'warm – a reply is running', color: GREEN }
+      : cacheLeftMs === null
+        ? { text: 'starts with your next message', color: MUTED }
+        : cacheLeftMs > 0
+          ? { text: `expires in ${cacheLeft(cacheLeftMs)}${cache.ttlMs === null ? ' (5m assumed)' : ''}`, color: cacheLeftMs <= cacheTtl / 5 ? AMBER : GREEN }
+          : { text: `expired ${duration(-cacheLeftMs)} ago – the next message re-sends the context`, color: RED }
+  // one row of the details under the bars: a name in a column of its own, the
+  // figures beside it, wrapping under themselves when the pane is narrow
+  const DETAIL_CELLS = 10
+  const detailRow = (name: string, value: RenderChildren) => (
+    <Box flexDirection="row">
+      <Box width={DETAIL_CELLS} flexShrink={0}>
+        <Text bold>{name}</Text>
+      </Box>
+      <Box flexDirection="row" flexShrink={1} flexWrap="wrap">
+        {value}
+      </Box>
+    </Box>
+  )
+  const hits = show.cache_hits && info.last?.hitPct != null ? `${info.last.hitPct}% hit last turn` : undefined
+  const cacheLine =
+    show.cache || hits
+      ? detailRow('Cache', [
+          show.cache ? <Text color={ink(cacheNote.color)} wrap="wrap">{cacheNote.text}</Text> : null,
+          show.cache && hits ? <Text color={MUTED}>{' · '}</Text> : null,
+          hits ? <Text color={MUTED} wrap="wrap">{hits}</Text> : null,
+        ])
+      : null
+  // turns until compact: to the auto compact % when that is on, else to where
+  // Claude Code compacts by itself (no free space left)
+  const toCompact = auto.isOn ? Math.max(0, ((auto.at ?? AT_DEFAULT) / 100) * snap.window - snap.tokens) : free
+  const turnsLeft = show.compact_forecast ? turnsUntilCompact(info.growth, toCompact) : null
+  const forecastLine =
+    turnsLeft !== null
+      ? detailRow('Compact', (
+          <Text color={turnsLeft <= 2 ? AMBER : MUTED} wrap="wrap">
+            {turnsLeft === 0
+              ? 'due now'
+              : `in about ${turnsLeft} ${turnsLeft === 1 ? 'turn' : 'turns'}${auto.isOn ? ` (auto at ${auto.at ?? AT_DEFAULT}%)` : ''}`}
+          </Text>
+        ))
+      : null
+  const sessionLine =
+    show.session && (info.costUsd !== null || info.turns !== null)
+      ? detailRow('Session', (
+          <Text color={MUTED} wrap="wrap">
+            {[info.costUsd !== null ? `$${info.costUsd.toFixed(2)}` : null, info.turns !== null ? `${info.turns} ${info.turns === 1 ? 'prompt' : 'prompts'}` : null]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+        ))
+      : null
+  const lastLine =
+    show.last_turn && info.last
+      ? detailRow('Last turn', (
+          <Text color={MUTED} wrap="wrap">{`${seconds(info.last.durationMs)} · ${tokens(info.last.outputTokens)} out · ${modelName(info.last.model)}`}</Text>
+        ))
+      : null
+  const agentsLine =
+    show.agents && info.agents.length > 0
+      ? detailRow('Agents', (
+          <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
+        ))
+      : null
+  const details = [cacheLine, forecastLine, sessionLine, lastLine, agentsLine].filter(row => row !== null)
+  const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
+
+  const contextBlock = (
+    <Box flexDirection="column" width={isSplit ? '50%' : undefined}>
+      {bar(`Context ${Math.round(snap.percent)}% used`, contextSegments, column)}
+      {isContextLine ? (
+        <Box flexDirection="row" justifyContent="space-between" columnGap={2}>
+          {contextName}
+          {freeText}
+        </Box>
+      ) : (
+        <Box flexDirection="column">
+          {contextName}
+          {freeText}
+        </Box>
+      )}
+      {(['Messages', 'Tools', 'Other'] as const)
+        .map(name => shown.find(c => c.name === name))
+        .filter((c): c is (typeof shown)[number] => c !== undefined)
+        .map(c => (
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text color={c.color}>{c.name}</Text>
+            <Text color={MUTED}>{tokens(c.tokens)}</Text>
+          </Box>
+        ))}
+    </Box>
+  )
+
+  // collapsed, the limits go by a short name and the time to their reset: "5H 1h 3m",
+  // "W 2d 21h"; a window not running shows its whole length: "5H 5h", "W 7d"
+  const compactItems = [
+    ...(show.limits ? limits : []).map(f => ({
+      label: f.label,
+      short: f.kind === 'five_hour' ? '5H' : f.kind === 'seven_day' ? 'W' : f.label,
+      // not running yet: the whole window, the countdown it will start from (5h, 7d)
+      until: f.status === 'idle' || !Number.isFinite(f.resetsAt) ? duration(WINDOWS[f.kind]?.ms ?? 0) : duration(f.resetsAt - now),
+      percent: f.percent,
+      color: f.color, marker: markerOf(f), segments: limitSegments(f), f: f as Forecast | undefined,
+    })),
+    // Context with the whole window, as the limits have their time: 1M, 200k
+    ...(show.context
+      ? [{ label: 'Context', short: 'Context', until: tokens(snap.window), percent: snap.percent, color: fillColor(snap.percent), marker: undefined as number | undefined, segments: contextSegments, f: undefined as Forecast | undefined }]
+      : []),
+  ]
+  const nameOf = (item: (typeof compactItems)[number]) => (
+    <Box flexDirection="row" columnGap={1} flexShrink={0}>
+      <Text bold>{item.short}</Text>
+      {item.until ? <Text color={MUTED}>{item.until}</Text> : null}
+    </Box>
+  )
+  const nameLength = (item: (typeof compactItems)[number]) => item.short.length + (item.until ? item.until.length + 1 : 0)
+  const third = Math.floor((width - 2 * 3) / 3)
+  // Collapsed, one row: each limit sits in a slot of fixed width, so W always starts at
+  // the same place: its name, room for the longest time ("4h 59m", "6d 23h"), its bar
+  // (one fixed width for both), room for "100%". A shorter time moves the bar left
+  // inside the slot, never the slot. Context takes all that is left, its % held to
+  // the right edge, its bar as wide as fits.
+  const TIME_CELLS = 6
+  const limitBar = Math.max(6, third - 'Weekly'.length - '100%'.length - 2)
+  const slotOf = (item: (typeof compactItems)[number]) => item.short.length + 1 + TIME_CELLS + 1 + limitBar + 1 + '100%'.length
+  // between the slots: enough that a 100% never runs into the next name
+  const GAP = 2
+  const slotsWidth = compactItems.filter(item => item.f).reduce((sum, item) => sum + slotOf(item) + GAP, 0)
+  const contextItem = show.context ? compactItems[compactItems.length - 1] : undefined
+  const contextBar = contextItem ? Math.max(6, width - slotsWidth - nameLength(contextItem) - 1 - 1 - `${Math.round(contextItem.percent)}%`.length) : 6
+  const collapsedBlock = isOneRow ? (
+    <Box flexDirection="row" columnGap={GAP}>
+      {compactItems.map(item => {
+        const pct = `${Math.round(item.percent)}%`
+        const isContext = item === contextItem
+        return (
+          <Box flexDirection="row" width={isContext ? undefined : slotOf(item)} flexGrow={isContext ? 1 : 0} flexShrink={isContext ? 1 : 0}>
+            <Box marginRight={1} flexShrink={0}>
+              {nameOf(item)}
+            </Box>
+            {isContext && Svg ? (
+              // on the desktop the bar stretches to fill what the row leaves, so the
+              // % lands at the right edge however wide the text draws
+              <Box flexGrow={1} flexShrink={1} height={1} alignItems="center">
+                <Svg alt={`Context ${pct} used`} source={barSvg(item.segments, 4000)} height={BAR_PX} />
+              </Box>
+            ) : (
+              bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, isContext ? contextBar : limitBar, item.marker, item.f)
+            )}
+            <Box marginLeft={1} flexShrink={0} flexGrow={isContext && !Svg ? 1 : 0} justifyContent={isContext ? 'flex-end' : undefined}>
+              <Text bold color={ink(item.color)}>{pct}</Text>
+            </Box>
+          </Box>
+        )
+      })}
+    </Box>
+  ) : (
+    // each on a row of its own, the names in one column (as wide as the longest) and
+    // the %s in another
+    (() => {
+      const nameCells = Math.max(8, ...compactItems.map(item => nameLength(item) + 1))
+      return (
+        <Box flexDirection="column">
+          {compactItems.map(item => (
+            <Box flexDirection="row">
+              <Box width={nameCells} flexShrink={0}>
+                {nameOf(item)}
+              </Box>
+              {bar(`${item.label} ${Math.round(item.percent)}% used`, item.segments, Math.max(6, width - nameCells - 6), item.marker, item.f)}
+              <Box marginLeft={2} flexShrink={0}>
+                <Text bold color={ink(item.color)}>{`${Math.round(item.percent)}%`}</Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      )
+    })()
+  )
+
+  const askText = ask ? <Text color={AMBER} wrap="wrap">{`Context is already at ${ask.percent}%, past ${ask.at}%. Auto compact:`}</Text> : null
+  const askButtons = (
+    <Box flexDirection="row" columnGap={1} flexWrap="wrap" flexShrink={0}>
+      <Button key="askNow" label="Now" onPress={() => void answerAsk($, 'now')} />
+      <Button key="askNext" label="After my next compact" onPress={() => void answerAsk($, 'next')} />
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column">
+      {isHeadBeside ? (
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={gap} paddingRight={HOST_HIDE}>
+          <Box flexShrink={1}>{headText}</Box>
+          {controls}
+        </Box>
+      ) : (
+        <Box flexDirection="column" marginBottom={gap}>
+          <Box paddingRight={HOST_HIDE}>{headText}</Box>
+          <Box marginTop={gap}>{controls}</Box>
+        </Box>
+      )}
+
+      {ask ? (
+        isAskLine ? (
+          <Box flexDirection="row" alignItems="center" columnGap={1} marginBottom={gap}>
+            <Box flexShrink={1}>{askText}</Box>
+            {askButtons}
           </Box>
         ) : (
           <Box flexDirection="column" marginBottom={gap}>
-            <Box>{headText}</Box>
-            <Box marginTop={gap}>{controls}</Box>
+            {askText}
+            <Box marginTop={gap}>{askButtons}</Box>
           </Box>
-        )}
+        )
+      ) : null}
 
-        {ask ? (
-          isAskLine ? (
-            <Box flexDirection="row" alignItems="center" columnGap={1} marginBottom={gap}>
-              <Box flexShrink={1}>{askText}</Box>
-              {askButtons}
-            </Box>
-          ) : (
-            <Box flexDirection="column" marginBottom={gap}>
-              {askText}
-              <Box marginTop={gap}>{askButtons}</Box>
-            </Box>
-          )
-        ) : null}
+      {collapsed ? (
+        compactItems.length > 0 ? collapsedBlock : null
+      ) : isSplit ? (
+        <Box flexDirection="row" columnGap={4}>
+          {limitsBlock}
+          {contextBlock}
+        </Box>
+      ) : (
+        <Box flexDirection="column">
+          {show.limits ? limitsBlock : null}
+          {show.limits && show.context ? <Text> </Text> : null}
+          {show.context ? contextBlock : null}
+        </Box>
+      )}
 
-        {collapsed ? (
-          compactItems.length > 0 ? collapsedBlock : null
-        ) : isSplit ? (
-          <Box flexDirection="row" columnGap={4}>
-            {limitsBlock}
-            {contextBlock}
-          </Box>
-        ) : (
-          <Box flexDirection="column">
-            {show.limits ? limitsBlock : null}
-            {show.limits && show.context ? <Text> </Text> : null}
-            {show.context ? contextBlock : null}
-          </Box>
-        )}
-
-        {detailBlock && (collapsed ? compactItems.length > 0 : show.limits || show.context) ? <Text> </Text> : null}
-        {detailBlock}
-      </Box>
-    )
-  })
+      {detailBlock && (collapsed ? compactItems.length > 0 : show.limits || show.context) ? <Text> </Text> : null}
+      {detailBlock}
+    </Box>
+  )
 }

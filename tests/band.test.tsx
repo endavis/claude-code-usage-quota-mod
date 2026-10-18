@@ -6,16 +6,22 @@ const MIN = 60_000
 const HOUR = 60 * MIN
 const SURFACES = ['terminal', 'desktop'] as const
 
-// the mod draws in its own pane, docked beside the transcript
-const PANE = { component: 'Pane', requestId: 'usage-quota' } as const
-const PROPS = {
-  title: 'Usage',
-  isFocused: false,
-  bodyColumns: 100,
-  placement: 'dock',
-  scroll: { offset: 0, bodyRows: 20 },
-  view: {},
-} as const
+// Every test runs at both placements: `right`, the mod's own pane docked beside the
+// transcript, and `bottom`, the band above the prompt. Each draws the same tree.
+const SITES = [
+  {
+    suffix: '',
+    config: { options: { placement: 'right' } },
+    target: { component: 'Pane', requestId: 'usage-quota' },
+    props: { title: 'Usage', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  },
+  {
+    suffix: ' (bottom)',
+    config: { options: { placement: 'bottom' } },
+    target: { component: 'AbovePrompt' },
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  },
+] as const
 
 const CATEGORIES = [
   { name: 'System prompt', tokens: 4_000, kind: 'used' },
@@ -87,7 +93,11 @@ async function fieldKey(ui: { find: (q: { type: 'Input' }) => Promise<{ props: {
   return String((await ui.find({ type: 'Input' }))?.props.key)
 }
 
-test('draws the band on track', async ($, on) => {
+for (const site of SITES) {
+const PANE = site.target
+const PROPS = site.props as never
+
+test('draws the band on track' + site.suffix, site.config, async ($, on) => {
   world(on, [
     { kind: 'five_hour', percentUsed: 8, resetsAt: iso(3 * HOUR + 24 * MIN) },
     { kind: 'seven_day', percentUsed: 46, resetsAt: iso(3 * 24 * HOUR + 7 * HOUR) },
@@ -154,7 +164,7 @@ test('draws the band on track', async ($, on) => {
   }
 })
 
-test('leads with a window that will run out', async ($, on) => {
+test('leads with a window that will run out' + site.suffix, site.config, async ($, on) => {
   world(on, [
     { kind: 'five_hour', percentUsed: 60, resetsAt: iso(4 * HOUR) },
     { kind: 'seven_day', percentUsed: 10, resetsAt: iso(5 * 24 * HOUR) },
@@ -172,7 +182,7 @@ test('leads with a window that will run out', async ($, on) => {
   }
 })
 
-test('says when a limit is reached', async ($, on) => {
+test('says when a limit is reached' + site.suffix, site.config, async ($, on) => {
   world(on, [{ kind: 'seven_day', percentUsed: 100, resetsAt: iso(2 * 24 * HOUR) }])
   await $.session.measure(MEASURE)
 
@@ -183,7 +193,7 @@ test('says when a limit is reached', async ($, on) => {
   }
 })
 
-test('treats the first 3% of a window as on track', async ($, on) => {
+test('treats the first 3% of a window as on track' + site.suffix, site.config, async ($, on) => {
   world(on, [{ kind: 'five_hour', percentUsed: 5, resetsAt: iso(5 * HOUR - 5 * MIN) }])
   await $.session.measure(MEASURE)
 
@@ -194,7 +204,7 @@ test('treats the first 3% of a window as on track', async ($, on) => {
   }
 })
 
-test('shows a refresh failure in the status line', async ($, on) => {
+test('shows a refresh failure in the status line' + site.suffix, site.config, async ($, on) => {
   const status: (string | undefined)[] = []
   mock.clock(on, { now: NOW })
   on('session.usage', () => ({ deny: 'no session' }))
@@ -203,7 +213,7 @@ test('shows a refresh failure in the status line', async ($, on) => {
   expect(status).toContainEqual(expect.stringMatching(/^usage-quota: (?!usage-quota).*no session/))
 })
 
-test('the Compact button runs /compact', async ($, on) => {
+test('the Compact button runs /compact' + site.suffix, site.config, async ($, on) => {
   const ran: string[] = []
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
@@ -224,7 +234,7 @@ test('the Compact button runs /compact', async ($, on) => {
   expect(ran).toEqual(['compact', 'compact'])
 })
 
-test('a fresh session shows the last saved limits until its first reply', async ($, on) => {
+test('a fresh session shows the last saved limits until its first reply' + site.suffix, site.config, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on, {
     limits: {
@@ -251,7 +261,7 @@ test('a fresh session shows the last saved limits until its first reply', async 
   }
 })
 
-test('with no reading anywhere, the left side says so', async ($, on) => {
+test('with no reading anywhere, the left side says so' + site.suffix, site.config, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.usage', () => ({ value: usage([]) }))
@@ -265,7 +275,7 @@ test('with no reading anywhere, the left side says so', async ($, on) => {
   }
 })
 
-test('the plan endpoint gives the limits before any reply, and wins', async ($, on) => {
+test('the plan endpoint gives the limits before any reply, and wins' + site.suffix, site.config, async ($, on) => {
   const asked: string[] = []
   mock.clock(on, { now: NOW })
   mock.store(on)
@@ -303,7 +313,7 @@ test('the plan endpoint gives the limits before any reply, and wins', async ($, 
   }
 })
 
-test('the exact /context count corrects the estimate, and Messages with it', async ($, on) => {
+test('the exact /context count corrects the estimate, and Messages with it' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   // the exact count: System tools 20k (estimate 34k), MCP tools 13k (estimate 17k)
@@ -331,7 +341,7 @@ test('the exact /context count corrects the estimate, and Messages with it', asy
   }
 })
 
-test('the plan limits are asked again every 2 minutes, with the exact count', async ($, on) => {
+test('the plan limits are asked again every 2 minutes, with the exact count' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   let used = 22
@@ -365,7 +375,7 @@ test('the plan limits are asked again every 2 minutes, with the exact count', as
   await ui.unmount()
 })
 
-test('a failed usage check says why, backs off, and the newest reply figures show', async ($, on) => {
+test('a failed usage check says why, backs off, and the newest reply figures show' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   let asks = 0
@@ -409,7 +419,7 @@ test('a failed usage check says why, backs off, and the newest reply figures sho
   await ui.unmount()
 })
 
-test('the back-off is shared: a refusal in one chat holds the others, and Retry-After is kept', async ($, on) => {
+test('the back-off is shared: a refusal in one chat holds the others, and Retry-After is kept' + site.suffix, site.config, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on, { planBackoff: { until: NOW + 10 * 60_000, failures: 3, error: 'refused (429)' } })
   let asks = 0
@@ -424,7 +434,7 @@ test('the back-off is shared: a refusal in one chat holds the others, and Retry-
   expect(asks).toBe(0)
 })
 
-test('after /compact, before any reply, the exact count is shown', async ($, on) => {
+test('after /compact, before any reply, the exact count is shown' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   // compacted: no reply yet, so no real total; the estimate says Messages 97k
@@ -448,7 +458,7 @@ test('after /compact, before any reply, the exact count is shown', async ($, on)
   }
 })
 
-test('one ask for the whole app: a chat opening just after another does not ask again', async ($, on) => {
+test('one ask for the whole app: a chat opening just after another does not ask again' + site.suffix, site.config, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on, { planAskedAt: NOW - 30_000 })
   let asks = 0
@@ -465,7 +475,7 @@ test('one ask for the whole app: a chat opening just after another does not ask 
   expect(asks).toBe(0)
 })
 
-test('a 5 hour window the service has no reset for (not started) shows 0%', async ($, on) => {
+test('a 5 hour window the service has no reset for (not started) shows 0%' + site.suffix, site.config, async ($, on) => {
   mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.usage', () => ({ value: usage([]) }))
@@ -530,7 +540,7 @@ function startWorld(on: On, percentRef: { value: number; isCompacted?: boolean }
   return clock
 }
 
-test('the arrow collapses the band to one row of three bars, and back', async ($, on) => {
+test('the arrow collapses the band to one row of three bars, and back' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 16 }
   startWorld(on, percent, [])
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
@@ -568,7 +578,7 @@ test('the arrow collapses the band to one row of three bars, and back', async ($
   }
 })
 
-test('collapsed is one setting for every chat: another chat collapsing shows here within half a second', async ($, on) => {
+test('collapsed is one setting for every chat: another chat collapsing shows here within half a second' + site.suffix, site.config, async ($, on) => {
   const shared: Record<string, unknown> = {}
   const clock = startWorld(on, { value: 16 }, [], [], 'Compact now', shared)
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
@@ -584,7 +594,7 @@ test('collapsed is one setting for every chat: another chat collapsing shows her
   await ui.unmount()
 })
 
-test('auto compact: the switch shows the field, and it compacts between turns once the context reaches the %', async ($, on) => {
+test('auto compact: the switch shows the field, and it compacts between turns once the context reaches the %' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 16 }
   const ran: string[] = []
   const clock = startWorld(on, percent, ran)
@@ -658,7 +668,7 @@ test('auto compact: the switch shows the field, and it compacts between turns on
   await ui.unmount()
 })
 
-test('auto compact set below the context asks in the band, and "Now" compacts', async ($, on) => {
+test('auto compact set below the context asks in the band, and "Now" compacts' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 50 }
   const ran: string[] = []
   const asked: string[] = []
@@ -680,7 +690,7 @@ test('auto compact set below the context asks in the band, and "Now" compacts', 
   await ui.unmount()
 })
 
-test('"After my next compact" holds through a % flickering below, until a real compaction', async ($, on) => {
+test('"After my next compact" holds through a % flickering below, until a real compaction' + site.suffix, site.config, async ($, on) => {
   const percent: { value: number; isCompacted?: boolean } = { value: 17 }
   const ran: string[] = []
   const clock = startWorld(on, percent, ran)
@@ -718,7 +728,7 @@ test('"After my next compact" holds through a % flickering below, until a real c
   await ui.unmount()
 })
 
-test('auto compact is per chat: another chat opens with it off, at 30%; turned on past it, it asks and waits', async ($, on) => {
+test('auto compact is per chat: another chat opens with it off, at 30%; turned on past it, it asks and waits' + site.suffix, site.config, async ($, on) => {
   const percent: { value: number; isCompacted?: boolean } = { value: 35 }
   const ran: string[] = []
   // another chat has it on at 20%
@@ -749,7 +759,7 @@ test('auto compact is per chat: another chat opens with it off, at 30%; turned o
   await ui.unmount()
 })
 
-test('auto compact tries again while the turn is still winding down', async ($, on) => {
+test('auto compact tries again while the turn is still winding down' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 16 }
   const clock = mock.clock(on, { now: NOW })
   mock.store(on, { 'autoCompact:chat': { isOn: true, at: 40 } })
@@ -782,7 +792,7 @@ test('auto compact tries again while the turn is still winding down', async ($, 
   expect(tries).toBe(3)
 })
 
-test('a chat opened past the auto compact % compacts at once, as after an app restart', async ($, on) => {
+test('a chat opened past the auto compact % compacts at once, as after an app restart' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 32 }
   const ran: string[] = []
   const clock = mock.clock(on, { now: NOW })
@@ -805,7 +815,7 @@ test('a chat opened past the auto compact % compacts at once, as after an app re
   expect(ran).toEqual(['compact'])
 })
 
-test('where the session cannot compact directly (the desktop app), auto compact types /compact', async ($, on) => {
+test('where the session cannot compact directly (the desktop app), auto compact types /compact' + site.suffix, site.config, async ($, on) => {
   const percent = { value: 32 }
   const ran: string[] = []
   const clock = mock.clock(on, { now: NOW })
@@ -832,11 +842,11 @@ test('where the session cannot compact directly (the desktop app), auto compact 
   expect(ran).toEqual(['compact'])
 })
 
-test('a narrow chat stacks the band and wraps its text, nothing cut off or dropped', async ($, on) => {
+test('a narrow chat stacks the band and wraps its text, nothing cut off or dropped' + site.suffix, site.config, async ($, on) => {
   startWorld(on, { value: 16 }, [])
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
   for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...PANE, props: { ...PROPS, bodyColumns: 38 } })
+    const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...PANE, props: { ...(PROPS as object), bodyColumns: 38 } as never })
     // the headline wraps, never truncated
     const head = await ui.find({ type: 'Text', text: /^On track\./ })
     expect(head?.props.wrap).toBe('wrap')
@@ -850,7 +860,7 @@ test('a narrow chat stacks the band and wraps its text, nothing cut off or dropp
   }
 })
 
-test('the desktop in light mode draws in the light palette', async ($, on) => {
+test('the desktop in light mode draws in the light palette' + site.suffix, site.config, async ($, on) => {
   const clock = startWorld(on, { value: 16 }, [])
   on('env.get', (_$, e) => ({ value: (e as unknown as { name: string }).name === 'APPDATA' ? 'C:/AppData' : undefined }) as never)
   // the settings file is read only when its time changes
@@ -874,7 +884,7 @@ test('the desktop in light mode draws in the light palette', async ($, on) => {
   await ui.unmount()
 })
 
-test('the settings saved under the old plugin name are copied over once, never over newer ones', async ($, on) => {
+test('the settings saved under the old plugin name are copied over once, never over newer ones' + site.suffix, site.config, async ($, on) => {
   const clock = startWorld(on, { value: 10 }, [], [], 'Compact now', { collapsed: false })
   on('env.get', (_$, e) => ({ value: (e as unknown as { name: string }).name === 'HOME' ? '/home/me' : undefined }) as never)
   const listed: string[] = []
@@ -895,7 +905,7 @@ test('the settings saved under the old plugin name are copied over once, never o
   await ui.unmount()
 })
 
-test('early in a window the forecast starts from the usual pace: a quick 4% does not turn it red', async ($, on) => {
+test('early in a window the forecast starts from the usual pace: a quick 4% does not turn it red' + site.suffix, site.config, async ($, on) => {
   // 4% in the first 10 minutes: alone that runs to 120%; with the usual pace, 60%
   world(on, [{ kind: 'five_hour', percentUsed: 4, resetsAt: iso(5 * HOUR - 10 * MIN) }])
   await $.session.measure(MEASURE)
@@ -905,7 +915,7 @@ test('early in a window the forecast starts from the usual pace: a quick 4% does
   await ui.unmount()
 })
 
-test('the usual pace is learned from how far past windows got', async ($, on) => {
+test('the usual pace is learned from how far past windows got' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   // the last window peaked at 20%, and two before it did too
   mock.store(on, { pace: { finals: { five_hour: [20, 20] }, windows: { five_hour: { resetsAt: NOW - HOUR, peak: 20, skip: 0 } } } })
@@ -919,7 +929,7 @@ test('the usual pace is learned from how far past windows got', async ($, on) =>
   await ui.unmount()
 })
 
-test("a reopened chat's first reply, re-reading its history, is left out of the pace", async ($, on) => {
+test("a reopened chat's first reply, re-reading its history, is left out of the pace" + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   // opened with 97k of history and no reply yet; an hour into the 5 hour window, at 10%
@@ -954,7 +964,7 @@ test("a reopened chat's first reply, re-reading its history, is left out of the 
   await ui.unmount()
 })
 
-test("a newer reply figure below the usage service's never pulls the band under it: 18.6% shows 19%, as the app does", async ($, on) => {
+test("a newer reply figure below the usage service's never pulls the band under it: 18.6% shows 19%, as the app does" + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   const state = { rateLimits: [] as SessionRateLimit[] }
@@ -983,7 +993,7 @@ test("a newer reply figure below the usage service's never pulls the band under 
   await ui.unmount()
 })
 
-test('a limit bar and its % turn amber from 75% used and red from 90%, even on track', async ($, on) => {
+test('a limit bar and its % turn amber from 75% used and red from 90%, even on track' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   const state = { percent: 74 }
@@ -1001,7 +1011,7 @@ test('a limit bar and its % turn amber from 75% used and red from 90%, even on t
   }
 })
 
-test('Context turns amber from 50% and red from 80%', async ($, on) => {
+test('Context turns amber from 50% and red from 80%' + site.suffix, site.config, async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   const state = { percent: 49 }
@@ -1019,3 +1029,4 @@ test('Context turns amber from 50% and red from 80%', async ($, on) => {
     await ui.unmount()
   }
 })
+}

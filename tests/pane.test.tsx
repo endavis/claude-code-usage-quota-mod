@@ -224,3 +224,45 @@ test('with the context and the limits both off, the pane is the controls and the
   expect(await ui.find({ type: 'Text', text: 'Cache' })).toBeDefined()
   await ui.unmount()
 })
+
+const BAND = { component: 'AbovePrompt' } as const
+const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 40, bodyColumns: 60, scroll: { offset: 0, bodyRows: 40 }, view: {} } as const
+
+test('placement right: the pane draws, the band is left to Claude Code', { options: { placement: 'right' } }, async ($, on) => {
+  world(on, null)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  expect(await pane.find({ type: 'Text', text: 'Cache' })).toBeDefined()
+  const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
+  expect(await band.find({ type: 'Text', text: 'Cache' })).toBeUndefined()
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('placement bottom: the band draws, no pane opens, and /quota turns the band off and on', { options: { placement: 'bottom' } }, async ($, on) => {
+  const calls: string[] = []
+  world(on, null, calls)
+  on('ui.panes', () => ({ value: [] }) as never)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...BAND, props: BAND_PROPS })
+  expect(await band.find({ type: 'Text', text: 'Cache' })).toBeDefined()
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  expect(await pane.find({ type: 'Text', text: 'Cache' })).toBeUndefined()
+
+  await $.command.run(QUOTA)
+  expect(await band.find({ type: 'Text', text: 'Cache' })).toBeUndefined()
+  await $.command.run(QUOTA)
+  expect(await band.find({ type: 'Text', text: 'Cache' })).toBeDefined()
+  expect(calls.filter(c => c.startsWith('open') || c.startsWith('close'))).toEqual([])
+  await band.unmount()
+  await pane.unmount()
+})
+
+test('switched to bottom in /config, the pane left open by the load before is closed', { options: { placement: 'bottom' } }, async ($, on) => {
+  const calls: string[] = []
+  const clock = world(on, null, calls)
+  on('ui.panes', () => ({ value: [{ id: 'usage-quota', title: 'Usage', isShown: true, isFocused: false, isPlaced: true }] }) as never)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  await clock.advance(1)
+  expect(calls).toEqual(['close usage-quota'])
+})
