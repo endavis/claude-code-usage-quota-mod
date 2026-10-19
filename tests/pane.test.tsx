@@ -376,6 +376,44 @@ test('with no rows in /config a press still tries /config, and a refusal is show
   await ui.unmount()
 })
 
+test('with no /config rows at start, /reload-plugins runs once, 10s on, and the transcript says so', async ($, on) => {
+  const logs: string[] = []
+  const runs: string[] = []
+  const clock = world(on, null, [], logs)
+  configRows(on, [], [])
+  on('command.run', { command: 'reload-plugins' }, () => (runs.push('reload-plugins'), { text: 'Reloaded: 1 plugin' }) as never)
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  await clock.advance(9_000)
+  expect(runs).toEqual([])
+  await clock.advance(2_000)
+  expect(runs).toEqual(['reload-plugins'])
+  expect(logs).toContain('usage-quota: /reload-plugins ran: Reloaded: 1 plugin')
+  // the reload starts the session's hooks again: still no rows, but no second run
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  await clock.advance(20_000)
+  expect(runs).toEqual(['reload-plugins'])
+})
+
+test('with /config rows at start, nothing is reloaded', async ($, on) => {
+  const runs: string[] = []
+  const clock = world(on, null)
+  configRows(on, ROWS(), [])
+  on('command.run', { command: 'reload-plugins' }, () => (runs.push('reload-plugins'), {}) as never)
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  await clock.advance(20_000)
+  expect(runs).toEqual([])
+})
+
+test('a /reload-plugins the app refuses is said in the transcript', async ($, on) => {
+  const logs: string[] = []
+  const clock = world(on, null, [], logs)
+  configRows(on, [], [])
+  on('command.run', { command: 'reload-plugins' }, () => { throw new Error('unknown command') })
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  await clock.advance(11_000)
+  expect(logs.some(l => l.startsWith('usage-quota: /reload-plugins not run: '))).toBe(true)
+})
+
 test('the read-only list names every userConfig field, with its title', async () => {
   const labels = givenRows({}).map(row => `${row.key}=${row.label}`)
   expect(labels).toEqual([

@@ -18,6 +18,9 @@ const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', w
 const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
+// whether this session already ran /reload-plugins for want of /config rows: kept in
+// state, which the reload keeps, so it runs once and cannot loop
+const rowsReload = atom({ plugin: 'usage-quota', key: 'rowsReload' } as const, false)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -1159,6 +1162,25 @@ async function loadSettings($: EngineInterface): Promise<void> {
   }
 }
 
+// The desktop app lists no /config rows for the mod after a fresh start, and
+// $.config.set refuses a key with no row; turning the plugin off and on brings them.
+// An experiment: once a session, a while after a start that found none, run
+// /reload-plugins and say in the transcript what came of it
+const ROWS_RELOAD_AFTER_MS = 10_000
+async function reloadForRows($: EngineInterface): Promise<void> {
+  if (!(await read($, settings)).isReadOnly || (await read($, rowsReload))) return
+  await update($, rowsReload, () => true)
+  $.clock.after(ROWS_RELOAD_AFTER_MS, async () => {
+    $.ui.log('usage-quota: no /config rows for the mod; running /reload-plugins once to look for them')
+    try {
+      const { text } = await $.command.run({ command: 'reload-plugins' })
+      $.ui.log(`usage-quota: /reload-plugins ran${text ? `: ${text}` : ''}`)
+    } catch (error) {
+      $.ui.log(`usage-quota: /reload-plugins not run: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+}
+
 async function openSettings($: EngineInterface): Promise<void> {
   await loadSettings($)
   await $.ui.open({ id: SETTINGS, title: SETTINGS_TITLE, focus: true, closeOnEscape: true })
@@ -1229,6 +1251,8 @@ export const register: Register = (on, options) => {
     void detectTtl($)
     // a change from the settings pane reloads the module: show the new values
     void loadSettings($)
+      .then(() => reloadForRows($))
+      .catch(error => $.ui.log(`usage-quota: rows reload not set up: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
     if (placement === 'right') {
       // opened unasked: docked from 144 columns (110 once the person has opened it),
       // waiting undrawn below that until /quota or a wider terminal

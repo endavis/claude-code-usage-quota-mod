@@ -74,6 +74,8 @@ declare module 'claude-code' {
       cacheTick: number
       sessionInfo: SessionInfo
       settings: QuotaSettings
+      /** this session already ran /reload-plugins for want of /config rows */
+      rowsReload: boolean
     }
   }
 }
