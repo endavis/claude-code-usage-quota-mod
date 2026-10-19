@@ -339,7 +339,7 @@ test('a change /config refuses is left as it was, and the pane says why', async 
 })
 
 for (const surface of ['desktop', 'terminal'] as const) {
-  test(`with no rows of the mod in /config (the desktop app), the pane lists what this load was given, and the command that sets them (${surface})`, { options: { placement: 'bottom', show_cache: false } }, async ($, on) => {
+  test(`with no rows of the mod in /config (the desktop app), the pane lists what this load was given as text, and how to change it (${surface})`, { options: { placement: 'bottom', show_cache: false } }, async ($, on) => {
     const sets: string[] = []
     const clock = world(on, null)
     configRows(on, [], sets)
@@ -347,72 +347,21 @@ for (const surface of ['desktop', 'terminal'] as const) {
     // the settings are read as the session starts: let that finish
     await clock.advance(100)
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...SETTINGS_PANE, props: PROPS })
-    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.placement' }))?.props.label).toBe('Placement: bottom')
-    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[ ] Show cache countdown')
-    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_limits' }))?.props.label).toBe('[x] Show plan limits')
-    expect((await ui.findAll({ type: 'Button' })).length).toBe(9)
+    expect(await ui.find({ type: 'Text', text: 'Placement: bottom' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '[ ] Show cache countdown' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '[x] Show plan limits' })).toBeDefined()
+    expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(9)
+    // nothing to press: /config would refuse a key it has no row for
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Type /reload-plugins once to make these clickable' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
     // a change there reloads the mod with the new values, in this session too
     expect(await ui.find({ type: 'Text', text: 'Changes apply right away. Esc closes this pane.' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'No settings to show.' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: 'Saved to /config. Esc closes this pane.' })).toBeUndefined()
+    expect(sets).toEqual([])
     await ui.unmount()
   })
 }
-
-test('with no rows in /config a press still tries /config, and a refusal is shown beside the command', { options: { placement: 'bottom' } }, async ($, on) => {
-  const sets: string[] = []
-  const clock = world(on, null)
-  configRows(on, [], sets, 'no row has this key')
-  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  await clock.advance(100)
-  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', ...SETTINGS_PANE, props: PROPS })
-  await ui.press({ key: 'set:usage-quota.show_cache' })
-  expect(sets).toEqual(['usage-quota.show_cache=false'])
-  expect(await ui.find({ type: 'Text', text: 'Show cache countdown: no row has this key' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
-  // left as this load was given it
-  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
-  await ui.unmount()
-})
-
-test('with no /config rows at start, /reload-plugins runs once, 10s on, and the transcript says so', async ($, on) => {
-  const logs: string[] = []
-  const runs: string[] = []
-  const clock = world(on, null, [], logs)
-  configRows(on, [], [])
-  on('command.run', { command: 'reload-plugins' }, () => (runs.push('reload-plugins'), { text: 'Reloaded: 1 plugin' }) as never)
-  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  await clock.advance(9_000)
-  expect(runs).toEqual([])
-  await clock.advance(2_000)
-  expect(runs).toEqual(['reload-plugins'])
-  expect(logs).toContain('usage-quota: /reload-plugins ran: Reloaded: 1 plugin')
-  // the reload starts the session's hooks again: still no rows, but no second run
-  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  await clock.advance(20_000)
-  expect(runs).toEqual(['reload-plugins'])
-})
-
-test('with /config rows at start, nothing is reloaded', async ($, on) => {
-  const runs: string[] = []
-  const clock = world(on, null)
-  configRows(on, ROWS(), [])
-  on('command.run', { command: 'reload-plugins' }, () => (runs.push('reload-plugins'), {}) as never)
-  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  await clock.advance(20_000)
-  expect(runs).toEqual([])
-})
-
-test('a /reload-plugins the app refuses is said in the transcript', async ($, on) => {
-  const logs: string[] = []
-  const clock = world(on, null, [], logs)
-  configRows(on, [], [])
-  on('command.run', { command: 'reload-plugins' }, () => { throw new Error('unknown command') })
-  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  await clock.advance(11_000)
-  expect(logs.some(l => l.startsWith('usage-quota: /reload-plugins not run: '))).toBe(true)
-})
 
 test('the read-only list names every userConfig field, with its title', async () => {
   const labels = givenRows({}).map(row => `${row.key}=${row.label}`)

@@ -18,9 +18,6 @@ const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', w
 const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
-// whether this session already ran /reload-plugins for want of /config rows: kept in
-// state, which the reload keeps, so it runs once and cannot loop
-const rowsReload = atom({ plugin: 'usage-quota', key: 'rowsReload' } as const, false)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -1067,8 +1064,8 @@ let given: PluginOptions = {}
 
 // This mod's userConfig fields, as plugin.json declares them: the settings pane
 // lists these where /config has no rows for the mod (the desktop app's /config is
-// its own settings window, without them), with the command that sets them where a
-// press is refused
+// its own settings window, without them after a fresh start), as text, with what
+// makes them clickable and the command that sets them
 const FIELDS: readonly { field: string; label: string; options?: readonly string[] }[] = [
   { field: 'placement', label: 'Placement', options: ['right', 'bottom'] },
   { field: 'show_limits', label: 'Show plan limits' },
@@ -1162,25 +1159,6 @@ async function loadSettings($: EngineInterface): Promise<void> {
   }
 }
 
-// The desktop app lists no /config rows for the mod after a fresh start, and
-// $.config.set refuses a key with no row; turning the plugin off and on brings them.
-// An experiment: once a session, a while after a start that found none, run
-// /reload-plugins and say in the transcript what came of it
-const ROWS_RELOAD_AFTER_MS = 10_000
-async function reloadForRows($: EngineInterface): Promise<void> {
-  if (!(await read($, settings)).isReadOnly || (await read($, rowsReload))) return
-  await update($, rowsReload, () => true)
-  $.clock.after(ROWS_RELOAD_AFTER_MS, async () => {
-    $.ui.log('usage-quota: no /config rows for the mod; running /reload-plugins once to look for them')
-    try {
-      const { text } = await $.command.run({ command: 'reload-plugins' })
-      $.ui.log(`usage-quota: /reload-plugins ran${text ? `: ${text}` : ''}`)
-    } catch (error) {
-      $.ui.log(`usage-quota: /reload-plugins not run: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  })
-}
-
 async function openSettings($: EngineInterface): Promise<void> {
   await loadSettings($)
   await $.ui.open({ id: SETTINGS, title: SETTINGS_TITLE, focus: true, closeOnEscape: true })
@@ -1251,8 +1229,6 @@ export const register: Register = (on, options) => {
     void detectTtl($)
     // a change from the settings pane reloads the module: show the new values
     void loadSettings($)
-      .then(() => reloadForRows($))
-      .catch(error => $.ui.log(`usage-quota: rows reload not set up: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
     if (placement === 'right') {
       // opened unasked: docked from 144 columns (110 once the person has opened it),
       // waiting undrawn below that until /quota or a wider terminal
@@ -1896,7 +1872,7 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
   return (
     <Box flexDirection="column">
       {rows.length === 0 ? <Text color={MUTED}>No settings to show.</Text> : null}
-      {rows.map((row, i) => (
+      {rows.map((row, i) => isReadOnly ? <Text>{valueOf(row)}</Text> : (
         <Box flexDirection="row" columnGap={1}>
           <Button
             key={`set:${row.key}`}
@@ -1911,10 +1887,11 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
       <Text> </Text>
       {error ? <Text color={AMBER} wrap="wrap">{error}</Text> : null}
       {isReadOnly ? (
-        // the rows are what this load was given: a press still tries /config, which
-        // may refuse a key it has no row for; the command changes them either way
+        // the rows are what this load was given, as text: $.config.set refuses a key
+        // /config has no row for. A /reload-plugins the person types brings the rows
+        // (the desktop refuses one a plugin runs), or the command changes them
         <Box flexDirection="column">
-          <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod. If a press is refused, change these in a terminal with:</Text>
+          <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod yet. Type /reload-plugins once to make these clickable, or change them in a terminal with:</Text>
           <Text wrap="wrap">{CONFIGURE_COMMAND}</Text>
           <Text color={MUTED} wrap="wrap">Changes apply right away. Esc closes this pane.</Text>
         </Box>
