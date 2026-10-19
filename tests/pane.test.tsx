@@ -338,24 +338,41 @@ test('a change /config refuses is left as it was, and the pane says why', async 
   await ui.unmount()
 })
 
-test('with no rows of the mod in /config (the desktop app), the pane lists what this load was given, read only, and the command that sets them', { options: { placement: 'bottom', show_cache: false } }, async ($, on) => {
+for (const surface of ['desktop', 'terminal'] as const) {
+  test(`with no rows of the mod in /config (the desktop app), the pane lists what this load was given, and the command that sets them (${surface})`, { options: { placement: 'bottom', show_cache: false } }, async ($, on) => {
+    const sets: string[] = []
+    const clock = world(on, null)
+    configRows(on, [], sets)
+    await $.session.start({ cwd: '.', surface, isInteractive: true })
+    // the settings are read as the session starts: let that finish
+    await clock.advance(100)
+    const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...SETTINGS_PANE, props: PROPS })
+    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.placement' }))?.props.label).toBe('Placement: bottom')
+    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[ ] Show cache countdown')
+    expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_limits' }))?.props.label).toBe('[x] Show plan limits')
+    expect((await ui.findAll({ type: 'Button' })).length).toBe(9)
+    expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
+    // a change there reloads the mod with the new values, in this session too
+    expect(await ui.find({ type: 'Text', text: 'Changes apply right away. Esc closes this pane.' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'No settings to show.' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'Saved to /config. Esc closes this pane.' })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('with no rows in /config a press still tries /config, and a refusal is shown beside the command', { options: { placement: 'bottom' } }, async ($, on) => {
   const sets: string[] = []
   const clock = world(on, null)
-  configRows(on, [], sets)
+  configRows(on, [], sets, 'no row has this key')
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
-  // the settings are read as the session starts: let that finish
   await clock.advance(100)
   const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'desktop', ...SETTINGS_PANE, props: PROPS })
-  expect(await ui.find({ type: 'Text', text: 'Placement: bottom' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '[ ] Show cache countdown' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '[x] Show plan limits' })).toBeDefined()
-  expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(9)
+  await ui.press({ key: 'set:usage-quota.show_cache' })
+  expect(sets).toEqual(['usage-quota.show_cache=false'])
+  expect(await ui.find({ type: 'Text', text: 'Show cache countdown: no row has this key' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: CONFIGURE_COMMAND })).toBeDefined()
-  // a change there reloads the mod with the new values, in this session too
-  expect(await ui.find({ type: 'Text', text: 'Changes apply right away. Esc closes this pane.' })).toBeDefined()
-  expect(await ui.find({ type: 'Button' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: 'No settings to show.' })).toBeUndefined()
-  expect(sets).toEqual([])
+  // left as this load was given it
+  expect((await ui.find({ type: 'Button', key: 'set:usage-quota.show_cache' }))?.props.label).toBe('[x] Show cache countdown')
   await ui.unmount()
 })
 

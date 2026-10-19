@@ -1064,7 +1064,8 @@ let given: PluginOptions = {}
 
 // This mod's userConfig fields, as plugin.json declares them: the settings pane
 // lists these where /config has no rows for the mod (the desktop app's /config is
-// its own settings window, without them), read only, with the command that sets them
+// its own settings window, without them), with the command that sets them where a
+// press is refused
 const FIELDS: readonly { field: string; label: string; options?: readonly string[] }[] = [
   { field: 'placement', label: 'Placement', options: ['right', 'bottom'] },
   { field: 'show_limits', label: 'Show plan limits' },
@@ -1150,7 +1151,7 @@ async function loadSettings($: EngineInterface): Promise<void> {
     const rows: SettingRow[] = (await $.config.list())
       .filter(row => row.key.startsWith('usage-quota.'))
       .map(row => ({ key: row.key, label: row.label, value: row.value, ...(row.options ? { options: row.options } : {}) }))
-    // no rows of ours in /config (the desktop app): what this load was given, read only
+    // no rows of ours in /config (the desktop app): what this load was given
     const isReadOnly = rows.length === 0
     await update($, settings, s => ({ ...s, rows: isReadOnly ? givenRows(given) : rows, isReadOnly }))
   } catch (error) {
@@ -1868,17 +1869,6 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
   const { rows, error, isReadOnly } = await read($, settings)
   const valueOf = (row: SettingRow) =>
     typeof row.value === 'boolean' ? `${row.value ? '[x]' : '[ ]'} ${row.label}` : `${row.label}: ${String(row.value)}`
-  if (isReadOnly) {
-    return (
-      <Box flexDirection="column">
-        {rows.map(row => <Text>{valueOf(row)}</Text>)}
-        <Text> </Text>
-        <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod. Change these in a terminal with:</Text>
-        <Text wrap="wrap">{CONFIGURE_COMMAND}</Text>
-        <Text color={MUTED} wrap="wrap">Changes apply right away. Esc closes this pane.</Text>
-      </Box>
-    )
-  }
   return (
     <Box flexDirection="column">
       {rows.length === 0 ? <Text color={MUTED}>No settings to show.</Text> : null}
@@ -1896,7 +1886,17 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
       ))}
       <Text> </Text>
       {error ? <Text color={AMBER} wrap="wrap">{error}</Text> : null}
-      <Text color={MUTED} wrap="wrap">Saved to /config. Esc closes this pane.</Text>
+      {isReadOnly ? (
+        // the rows are what this load was given: a press still tries /config, which
+        // may refuse a key it has no row for; the command changes them either way
+        <Box flexDirection="column">
+          <Text color={MUTED} wrap="wrap">This app's /config has no rows for this mod. If a press is refused, change these in a terminal with:</Text>
+          <Text wrap="wrap">{CONFIGURE_COMMAND}</Text>
+          <Text color={MUTED} wrap="wrap">Changes apply right away. Esc closes this pane.</Text>
+        </Box>
+      ) : (
+        <Text color={MUTED} wrap="wrap">Saved to /config. Esc closes this pane.</Text>
+      )}
     </Box>
   )
 }
