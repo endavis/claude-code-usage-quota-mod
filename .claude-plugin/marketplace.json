@@ -7,7 +7,7 @@
       "name": "usage-quota",
       "source": "./",
       "description": "Know your Claude limits before they hit you (Live pane docked on the right of Claude Code): 5 Hour and Weekly usage (whole account) with a live usage forecast against limit resets, context window usage, one-click Compact and per-session Auto compact (30% default).",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "license": "MIT",
       "keywords": ["usage", "quota", "rate limits", "context window", "compact", "mod"]
     }
