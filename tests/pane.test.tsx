@@ -188,8 +188,12 @@ test('the detail rows: cache hits, compact forecast, session, last turn and runn
   expect(await ui.find({ type: 'Text', text: '96% hit last turn' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '$4.12 · 3 prompts' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '42s · 1k out · opus-5-5' })).toBeDefined()
-  // only the running agent
-  expect(await ui.find({ type: 'Text', text: '1 running: Explore' })).toBeDefined()
+  // the running agent, then, dim, the one that ended
+  expect(await ui.find({ type: 'Text', text: '1 running:' })).toBeDefined()
+  expect((await ui.find({ type: 'Button', key: 'agent:a0' }))?.props.label).toBe('Explore')
+  const ended = await ui.find({ type: 'Button', key: 'agent:a1' })
+  expect(ended?.props.label).toBe('plan it (completed)')
+  expect(ended?.props.dimColor).toBe(true)
   // 20k a turn, and 200k less 60k used left before Claude Code compacts: 7 turns
   expect(await ui.find({ type: 'Text', text: 'in about 7 turns' })).toBeDefined()
   await ui.unmount()

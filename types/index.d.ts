@@ -34,12 +34,11 @@ export type PromptCache = { lastAt: number | null; ttlMs: number | null; transcr
 /** the last main-thread turn: how long it took, what it wrote, which model, and the share of its input the cache served */
 export type LastTurn = { durationMs: number; outputTokens: number; model: string; hitPct: number | null }
 
-/** the session beyond the context: its cost, its prompts, its last turn, the agents running, and the context at each turn's end */
+/** the session beyond the context: its cost, its prompts, its last turn, and the context at each turn's end */
 export type SessionInfo = {
   costUsd: number | null
   turns: number | null
   last: LastTurn | null
-  agents: string[]
   /** context tokens at the end of the newest main-thread turns, oldest first, since the last compaction */
   growth: number[]
 }
@@ -64,6 +63,31 @@ export type Shell = {
   status: 'running' | 'completed' | 'failed' | 'killed' | 'ended'
   exitCode: number | null
   endedAt: number | null
+}
+
+/**
+ * a subagent or teammate of this session, as $.agent.list() names it, with what
+ * the pane saw of it: its spawn (start, prompt, model), its tool calls and its
+ * turns. `endedAt` is when it was first seen not running
+ */
+export type Agent = {
+  id: string
+  name: string | null
+  description: string
+  type: string
+  status: string
+  parentId: string | null
+  spawnedBy: string | null
+  /** when its spawn started, or else when the pane first saw it */
+  startedAt: number
+  isStartSeen: boolean
+  endedAt: number | null
+  prompt: string | null
+  model: string | null
+  turns: number
+  outputTokens: number
+  toolCalls: number
+  lastTool: { name: string; detail: string | null; at: number } | null
 }
 
 /**
@@ -108,6 +132,11 @@ declare module 'claude-code' {
       shellView: ShellView
       /** the Shells row as its count alone (kept for every chat, as isCollapsed is) */
       shellsCollapsed: boolean
+      /** the agents running, and the ones that ended lately */
+      agents: Agent[]
+      /** the agent the agent pane shows, and why its last Stop failed */
+      agentView: { id: string | null; error: string | null }
+      agentsCollapsed: boolean
     }
   }
 }
