@@ -1860,8 +1860,9 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
         ))
       : null
   // the background shells, each a button that opens its own pane: the running ones,
-  // then, dim, the ones that ended lately and how, and Clear for those. Collapsed
-  // (its arrow, as the band's own), the count alone
+  // then, dim, the ones that ended lately and how. Clear for those comes first, so
+  // a long list need not be scrolled to reach it. Collapsed (its arrow, as the
+  // band's own), the count alone
   const runningShells = shellList.filter(sh => sh.status === 'running')
   const endedShells = shellList.filter(sh => sh.status !== 'running').reverse()
   const shellCount = runningShells.length > 0 ? `${runningShells.length} running` : 'none running'
@@ -1872,6 +1873,11 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
             <Button key="shellsCollapse" label={isShellsCollapsed ? '▲' : '▼'} plain onPress={() => toggleShells($)} />
           </Box>,
           <Text color={MUTED}>{isShellsCollapsed ? shellCount : runningShells.length > 0 ? `${shellCount}:` : `${shellCount} ·`}</Text>,
+          !isShellsCollapsed && endedShells.length > 0 ? (
+            <Box marginLeft={1} marginRight={1}>
+              <Button key="clearShells" label="Clear" onPress={() => clearShells($)} />
+            </Box>
+          ) : null,
           ...(isShellsCollapsed ? [] : [...runningShells, ...endedShells]).map(sh => (
             <Box marginLeft={1}>
               <Button
@@ -1883,11 +1889,6 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
               />
             </Box>
           )),
-          !isShellsCollapsed && endedShells.length > 0 ? (
-            <Box marginLeft={1}>
-              <Button key="clearShells" label="Clear" onPress={() => clearShells($)} />
-            </Box>
-          ) : null,
         ])
       : null
   // In the band, where the limits and the context stand side by side, the details

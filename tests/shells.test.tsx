@@ -210,6 +210,9 @@ test('Clear takes the ended shells away; the arrow collapses the row to its coun
   // nothing ended yet: no Clear
   expect(await ui.find({ type: 'Button', key: 'clearShells' })).toBeUndefined()
   await $.tool.call({ tool: 'TaskStop', task_id: 'b1' } as never)
+  // Clear comes before the shells, however many there are
+  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key)
+  expect(keys.indexOf('clearShells')).toBeLessThan(keys.indexOf('shell:b2'))
   await ui.press({ key: 'clearShells' })
   expect(await ui.find({ type: 'Button', key: 'shell:b1' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'shell:b2' })).toBeDefined()
