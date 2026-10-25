@@ -66,8 +66,12 @@ export type Shell = {
   endedAt: number | null
 }
 
-/** the shell pane: which shell it shows, the tail of its output, and when the output last changed */
-export type ShellView = { id: string | null; output: string | null; outputAt: number | null; error: string | null }
+/**
+ * the shell pane: which shell it shows, its output (the last lines, or as much of
+ * the whole as it holds), how many bytes at the start were left out, when the
+ * output last changed
+ */
+export type ShellView = { id: string | null; isFull: boolean; output: string | null; skipped: number; outputAt: number | null; error: string | null }
 
 /** one of this mod's own /config rows, as the settings pane shows it */
 export type SettingRow = { key: string; label: string; value: boolean | string | number | readonly string[]; options?: readonly string[] }

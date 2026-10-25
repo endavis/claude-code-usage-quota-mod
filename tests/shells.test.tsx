@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { endMissing, endShell, endWithAgents, notificationsOf, outputFileOf, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
+import { endMissing, endShell, endWithAgents, notificationsOf, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
 import type { Shell } from '../types'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
@@ -78,7 +78,7 @@ test("the output's tail: escapes out, a redrawn line as last drawn, the last lin
 })
 
 // what the engine answers beneath the plugin; `output` is the shell's file
-function world(on: On, calls: string[], output = { text: 'line 1\nline 2\n' }, agents: { id: string; name?: string; type: string; description: string; status: string }[] = []) {
+function world(on: On, calls: string[], output = { text: 'line 1\nline 2\n' }, agents: { id: string; name?: string; type: string; description: string; status: string }[] = [], env: Record<string, string> = {}) {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.usage', () => ({
@@ -96,7 +96,7 @@ function world(on: On, calls: string[], output = { text: 'line 1\nline 2\n' }, a
   on('session.id', () => ({ value: 's1' }) as never)
   on('session.cwd', () => ({ value: '/work/app' }) as never)
   on('session.root', () => ({ value: '/work/app' }) as never)
-  on('env.get', () => ({ value: undefined }) as never)
+  on('env.get', (_$, e) => ({ value: env[(e as unknown as { name: string }).name] }) as never)
   on('fs.exists', () => ({ value: false }) as never)
   on('fs.stat', () => ({ value: { kind: 'file', size: output.text.length, mtimeMs: NOW, isLink: false } }) as never)
   on('fs.read', () => ({ value: output.text }) as never)
@@ -230,6 +230,68 @@ test('Clear takes the ended shells away; the arrow collapses the row to its coun
   await ui.press({ key: 'shellsCollapse' })
   expect(await ui.find({ type: 'Text', text: 'none running ·' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'shell:b2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Full output shows every line, and goes back to the last 40', async ($, on) => {
+  const calls: string[] = []
+  const output = { text: Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join('\n') + '\n' }
+  world(on, calls, output)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await ui.press({ key: 'shell:b1' })
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...SHELL_PANE, props: { ...PROPS, title: 'Shell' } })
+  expect(await pane.find({ type: 'Text', text: 'Output (last 40 lines)' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^line 1$/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: 'line 61' })).toBeDefined()
+
+  await pane.press({ key: 'fullOutput' })
+  expect(await pane.find({ type: 'Text', text: 'Output (all of it)' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^line 1$/ })).toBeDefined()
+  expect((await pane.find({ type: 'Button', key: 'fullOutput' }))?.props.label).toBe('Last 40 lines')
+  await pane.press({ key: 'fullOutput' })
+  expect(await pane.find({ type: 'Text', text: /^line 1$/ })).toBeUndefined()
+  await pane.unmount()
+  await ui.unmount()
+})
+
+test("the heading says when the full output is only the file's end", async () => {
+  expect(outputHeading({ isFull: false, output: 'a', skipped: 0 })).toBe('Output (last 40 lines)')
+  expect(outputHeading({ isFull: true, output: 'a\nb', skipped: 0 })).toBe('Output (all of it)')
+  expect(outputHeading({ isFull: true, output: 'a\nb', skipped: 9_000 })).toBe('Output (last 2 lines; earlier output is in the file)')
+})
+
+test('with no screen to show a viewer on (no display), there is no Open', async ($, on) => {
+  world(on, [])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'Linux\n', stderr: '' } }) as never)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await ui.press({ key: 'shell:b1' })
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...SHELL_PANE, props: { ...PROPS, title: 'Shell' } })
+  expect(await pane.find({ type: 'Button', key: 'fullOutput' })).toBeDefined()
+  expect(await pane.find({ type: 'Button', key: 'openOutput' })).toBeUndefined()
+  await pane.unmount()
+  await ui.unmount()
+})
+
+test("Open runs the system's viewer on the output file, where there is a display", async ($, on) => {
+  const runs: string[] = []
+  world(on, [], undefined, [], { DISPLAY: ':0' })
+  on('process.run', (_$, e) => {
+    const argv = (e as unknown as { argv: string[] }).argv
+    runs.push(argv.join(' '))
+    return { value: { exitCode: 0, stdout: argv[0] === 'uname' ? 'Linux\n' : '/usr/bin/xdg-open\n', stderr: '' } } as never
+  })
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await ui.press({ key: 'shell:b1' })
+  const pane = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...SHELL_PANE, props: { ...PROPS, title: 'Shell' } })
+  await pane.press({ key: 'openOutput' })
+  expect(runs.at(-1)).toBe(`sh -c xdg-open "$1" >/dev/null 2>&1 & sh ${OUTPUT}`)
+  await pane.unmount()
   await ui.unmount()
 })
 

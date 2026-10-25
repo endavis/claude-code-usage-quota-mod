@@ -21,7 +21,7 @@ const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { row
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 const shells = atom({ plugin: 'usage-quota', key: 'shells' } as const, [] as Shell[])
 const shellsCollapsed = atom({ plugin: 'usage-quota', key: 'shellsCollapsed' } as const, false)
-const shellView = atom({ plugin: 'usage-quota', key: 'shellView' } as const, { id: null, output: null, outputAt: null, error: null } as ShellView)
+const shellView = atom({ plugin: 'usage-quota', key: 'shellView' } as const, { id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null } as ShellView)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
 // transcript in a wide fullscreen terminal or a wide desktop panel and sits above
@@ -1164,6 +1164,9 @@ const SHELL_KEEP = 5
 // the tail of a shell's output the pane shows: its last lines, read from its last bytes
 const SHELL_LINES = 40
 const SHELL_TAIL_BYTES = 16 * 1024
+// Full output: the whole file, up to its last 256 KB and 2000 lines
+const SHELL_FULL_BYTES = 256 * 1024
+const SHELL_FULL_LINES = 2000
 // a shell the Stop hook's list leaves out has ended, unless it started a moment
 // ago (after the list was made)
 const SHELL_GRACE_MS = 2_000
@@ -1273,12 +1276,16 @@ async function loadShellOutput($: EngineInterface): Promise<void> {
   if (!sh?.outputFile) return
   try {
     const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
-    const text = size <= SHELL_TAIL_BYTES
+    const bytes = view.isFull ? SHELL_FULL_BYTES : SHELL_TAIL_BYTES
+    const skipped = Math.max(0, size - bytes)
+    let text = skipped === 0
       ? await $.fs.read(sh.outputFile)
-      : (await $.process.run(['tail', '-c', String(SHELL_TAIL_BYTES), sh.outputFile], { timeoutMs: 5_000 })).stdout
-    const output = outputTail(text)
-    if (output !== view.output || mtimeMs !== view.outputAt || view.error !== null) {
-      await update($, shellView, v => (v.id === sh.id ? { ...v, output, outputAt: mtimeMs, error: null } : v))
+      : (await $.process.run(['tail', '-c', String(bytes), sh.outputFile], { timeoutMs: 5_000 })).stdout
+    // the first line of a tail is usually cut short
+    if (skipped > 0) text = text.slice(text.indexOf('\n') + 1)
+    const output = outputTail(text, view.isFull ? SHELL_FULL_LINES : SHELL_LINES)
+    if (output !== view.output || skipped !== view.skipped || mtimeMs !== view.outputAt || view.error !== null) {
+      await update($, shellView, v => (v.id === sh.id && v.isFull === view.isFull ? { ...v, output, skipped, outputAt: mtimeMs, error: null } : v))
     }
   } catch (error) {
     const message = `output not read: ${error instanceof Error ? error.message : String(error)}`
@@ -1299,9 +1306,50 @@ async function toggleShells($: EngineInterface): Promise<void> {
 }
 
 async function openShell($: EngineInterface, id: string): Promise<void> {
-  await update($, shellView, () => ({ id, output: null, outputAt: null, error: null }))
+  await update($, shellView, () => ({ id, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
   await loadShellOutput($)
   await $.ui.open({ id: SHELL, title: SHELL_TITLE, focus: true, closeOnEscape: true })
+}
+
+// Full output, or back to the last lines
+async function toggleFullOutput($: EngineInterface): Promise<void> {
+  await update($, shellView, v => ({ ...v, isFull: !v.isFull, output: null, skipped: 0 }))
+  await loadShellOutput($)
+}
+
+// Open: the output file in the system's own viewer, where there is one to see: the
+// command that opens a file, found once a session, or null (Linux with no display,
+// as over ssh; a Mac reached by ssh, whose viewer opens on its own screen)
+let viewer: readonly string[] | null = null
+async function findViewer($: EngineInterface): Promise<void> {
+  try {
+    if (await $.env.get('APPDATA')) {
+      viewer = ['cmd', '/c', 'start', '""']
+      return
+    }
+    const { stdout } = await $.process.run(['uname', '-s'], { timeoutMs: 5_000 })
+    if (/darwin/i.test(stdout)) {
+      viewer = (await $.env.get('SSH_CONNECTION')) ? null : ['open']
+    } else if ((await $.env.get('DISPLAY')) || (await $.env.get('WAYLAND_DISPLAY'))) {
+      const found = await $.process.run(['sh', '-c', 'command -v xdg-open'], { timeoutMs: 5_000 })
+      // started apart, so a viewer that stays up never holds the call
+      viewer = found.exitCode === 0 ? ['sh', '-c', 'xdg-open "$1" >/dev/null 2>&1 &', 'sh'] : null
+    } else {
+      viewer = null
+    }
+  } catch {
+    viewer = null
+  }
+}
+
+async function openOutput($: EngineInterface, path: string): Promise<void> {
+  if (!viewer) return
+  try {
+    const { exitCode, stderr } = await $.process.run([...viewer, path], { timeoutMs: 10_000 })
+    if (exitCode !== 0) throw new Error(stderr.trim() || `exit ${exitCode}`)
+  } catch (error) {
+    await update($, shellView, v => ({ ...v, error: `not opened: ${error instanceof Error ? error.message : String(error)}` }))
+  }
 }
 
 // Stop: TaskStop, as Claude would call it (the permission check included)
@@ -1393,6 +1441,7 @@ export const register: Register = (on, options) => {
     $.clock.every(LOCAL_EVERY_MS, () => void refreshSession($))
     void refreshSession($)
     $.clock.every(LOCAL_EVERY_MS, () => void refreshShells($))
+    void findViewer($)
     $.clock.every(COLLAPSE_EVERY_MS, () => void syncCollapsed($))
     // whatever surface the session started on (a desktop chat may say none)
     await syncTheme($)
@@ -1585,7 +1634,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
     if (e.id === PANE && e.origin.kind === 'person') await update($, isOn, () => false)
-    if (e.id === SHELL) await update($, shellView, () => ({ id: null, output: null, outputAt: null, error: null }))
+    if (e.id === SHELL) await update($, shellView, () => ({ id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
     return result
   }).catch(($, e, next) => next(e)) // a close is never held back by this
 
@@ -2181,6 +2230,14 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
   )
 }
 
+// what the output under it is: the last lines, the whole file, or as much as is held
+export function outputHeading(view: Pick<ShellView, 'isFull' | 'output' | 'skipped'>): string {
+  if (!view.isFull) return `Output (last ${SHELL_LINES} lines)`
+  const lines = view.output?.split('\n').length ?? 0
+  if (view.skipped > 0 || lines >= SHELL_FULL_LINES) return `Output (last ${lines} lines; earlier output is in the file)`
+  return 'Output (all of it)'
+}
+
 // The shell pane: what one background shell runs, how long, how it ended, and the
 // last lines of its output, read again every 3s while the pane is open
 async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
@@ -2214,16 +2271,24 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       {view.outputAt !== null ? row('Changed', `${cacheLeft(Math.max(0, now - view.outputAt))} ago`) : null}
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
+      {sh.outputFile ? (
+        <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+          <Button key="fullOutput" label={view.isFull ? `Last ${SHELL_LINES} lines` : 'Full output'} hotkey="f" onPress={() => toggleFullOutput($)} />
+          {viewer ? <Button key="openOutput" label="Open" hotkey="o" onPress={() => openOutput($, sh.outputFile!)} /> : null}
+          {isRunning ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
+        </Box>
+      ) : isRunning ? (
+        <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} />
+      ) : null}
+      <Text> </Text>
       {view.output === null ? null : view.output === '' ? (
         <Text color={MUTED}>No output yet.</Text>
       ) : (
         <Box flexDirection="column">
-          <Text bold>{`Output (last ${SHELL_LINES} lines)`}</Text>
+          <Text bold>{outputHeading(view)}</Text>
           {view.output.split('\n').map(line => <Text wrap="wrap">{line === '' ? ' ' : line}</Text>)}
         </Box>
       )}
-      <Text> </Text>
-      {isRunning ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
       <Text color={MUTED} wrap="wrap">{isRunning ? 'A running shell can show here until the tool call in progress ends. Esc closes this pane.' : 'Esc closes this pane.'}</Text>
     </Box>
   )
