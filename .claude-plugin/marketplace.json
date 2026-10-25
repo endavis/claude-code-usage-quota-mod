@@ -1,7 +1,7 @@
 {
   "name": "claude-code-usage-quota-mod",
-  "owner": { "name": "Anant Raghunath" },
-  "metadata": { "description": "Claude Code mods by Anant Raghunath" },
+  "owner": { "name": "Eric Davis" },
+  "metadata": { "description": "Claude Code mods by Eric Davis" },
   "plugins": [
     {
       "name": "usage-quota",

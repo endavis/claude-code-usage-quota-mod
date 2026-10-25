@@ -1,6 +1,6 @@
 # Claude Code Usage Quota Mod with Auto Compact
 
-[![Version: v0.2.6](docs/badges/version-v0.2.6.svg)](https://github.com/anantraghunath/claude-code-usage-quota-mod/releases/latest) ![Auto compact: 30% default](docs/badges/auto-compact-v2.svg) ![Compact: one click](docs/badges/compact-v2.svg) ![5 Hour + Weekly: whole account](docs/badges/limits-v2.svg) ![Forecast: before reset](docs/badges/forecast-v2.svg) ![Works in: Desktop + Terminal](docs/badges/works-in-v2.svg) ![License: MIT](docs/badges/license-v2.svg)
+[![Version: v0.2.6](docs/badges/version-v0.2.6.svg)](https://github.com/endavis/claude-code-usage-quota-mod/releases/latest) ![Auto compact: 30% default](docs/badges/auto-compact-v2.svg) ![Compact: one click](docs/badges/compact-v2.svg) ![5 Hour + Weekly: whole account](docs/badges/limits-v2.svg) ![Forecast: before reset](docs/badges/forecast-v2.svg) ![Works in: Desktop + Terminal](docs/badges/works-in-v2.svg) ![License: MIT](docs/badges/license-v2.svg)
 
 **Know your Claude limits before they hit you.** A live pane docked on the right of Claude Code that shows your plan limits, forecasts whether you'll run out before they reset, shows how full your context window is, and counts down until your prompt cache expires. **Compact in one click, or let it compact automatically.**
 
@@ -120,13 +120,13 @@ Needs **Claude Code 2.1.287 or later**, signed in with a **Pro or Max** plan.
 **Desktop app:** in the **Code** tab, send this as a message, allow the `claude plugin` commands if asked, then **quit and reopen** the app:
 
 ```text
-Install the usage-quota plugin from the GitHub marketplace anantraghunath/claude-code-usage-quota-mod
+Install the usage-quota plugin from the GitHub marketplace endavis/claude-code-usage-quota-mod
 ```
 
 **Terminal:** inside `claude`, run these one at a time:
 
 ```text
-/plugin marketplace add anantraghunath/claude-code-usage-quota-mod
+/plugin marketplace add endavis/claude-code-usage-quota-mod
 ```
 
 ```text
@@ -190,7 +190,7 @@ then restart. This removes it from both. Just want it out of sight? **`/quota`**
 <summary>From your own shell instead</summary>
 
 ```bash
-claude plugin marketplace add anantraghunath/claude-code-usage-quota-mod; claude plugin install usage-quota@claude-code-usage-quota-mod
+claude plugin marketplace add endavis/claude-code-usage-quota-mod; claude plugin install usage-quota@claude-code-usage-quota-mod
 ```
 
 To update:
@@ -225,7 +225,7 @@ claude plugin marketplace remove claude-code-usage-quota-mod
 
 ## FEEDBACK AND CONTRIBUTING
 
-First release: I'd love to hear how it works for you. [Open an issue](https://github.com/anantraghunath/claude-code-usage-quota-mod/issues) for bugs or ideas. Pull requests welcome.
+[Open an issue](https://github.com/endavis/claude-code-usage-quota-mod/issues) for bugs or ideas. Pull requests welcome.
 
 To work on it, clone the repo, then load it from the folder, or run its tests:
 
@@ -241,8 +241,10 @@ claude plugin test ./claude-code-usage-quota-mod
 
 ## CREDITS
 
+Built on [claude-code-usage-quota-mod](https://github.com/anantraghunath/claude-code-usage-quota-mod) by [Anant Raghunath](https://github.com/anantraghunath), who created the band, the plan limits and their forecast, the context bar and Auto compact. This repository started as a fork of it and is maintained separately.
+
 Inspired by [I'm liking the new mods feature](https://www.reddit.com/r/ClaudeCode/comments/1wwjman/im_liking_the_new_mods_feature/) on r/ClaudeCode. Thanks to [u/itsxzy](https://www.reddit.com/user/itsxzy/) for sharing the original prompt that started this project.
 
 ## LICENSE
 
-[MIT](LICENSE) © 2026 Anant Raghunath
+[MIT](LICENSE) © 2026 Anant Raghunath, © 2026 Eric Davis
