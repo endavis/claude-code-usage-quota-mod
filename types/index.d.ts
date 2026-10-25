@@ -44,6 +44,31 @@ export type SessionInfo = {
   growth: number[]
 }
 
+/**
+ * a background shell of this session, from the Bash call that came back with it
+ * (run in the background, or moved there by ctrl+b or a timeout) to its end:
+ * `ended` when it went without a notification saying how (a subagent's shell)
+ */
+export type Shell = {
+  id: string
+  command: string
+  description: string | null
+  toolUseId: string
+  /** the subagent that started it, and its name; null on the main thread */
+  agentId: string | null
+  agent: string | null
+  /** killed with the subagent that started it when that agent answers */
+  endsWithAgent: boolean
+  outputFile: string | null
+  startedAt: number
+  status: 'running' | 'completed' | 'failed' | 'killed' | 'ended'
+  exitCode: number | null
+  endedAt: number | null
+}
+
+/** the shell pane: which shell it shows, the tail of its output, and when the output last changed */
+export type ShellView = { id: string | null; output: string | null; outputAt: number | null; error: string | null }
+
 /** one of this mod's own /config rows, as the settings pane shows it */
 export type SettingRow = { key: string; label: string; value: boolean | string | number | readonly string[]; options?: readonly string[] }
 
@@ -74,6 +99,9 @@ declare module 'claude-code' {
       cacheTick: number
       sessionInfo: SessionInfo
       settings: QuotaSettings
+      /** the running background shells, and the ones that ended lately */
+      shells: Shell[]
+      shellView: ShellView
     }
   }
 }

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderChildren, RenderElement, RenderInput, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, QuotaSettings, SessionInfo, SettingRow, Snapshot } from '../types'
+import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, QuotaSettings, SessionInfo, SettingRow, Shell, ShellView, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -19,6 +19,8 @@ const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const,
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
+const shells = atom({ plugin: 'usage-quota', key: 'shells' } as const, [] as Shell[])
+const shellView = atom({ plugin: 'usage-quota', key: 'shellView' } as const, { id: null, output: null, outputAt: null, error: null } as ShellView)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
 // transcript in a wide fullscreen terminal or a wide desktop panel and sits above
@@ -28,6 +30,9 @@ const PANE_TITLE = 'Usage'
 // a second pane, opened from the first: each of this mod's /config rows as a button
 const SETTINGS = 'usage-quota-settings'
 const SETTINGS_TITLE = 'Quota settings'
+// a third, opened from the Shells row: one background shell, its output's tail
+const SHELL = 'usage-quota-shell'
+const SHELL_TITLE = 'Shell'
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -1048,7 +1053,7 @@ export function cacheLeft(ms: number): string {
 
 // What the pane shows, each part a userConfig option (a row in /config; a change
 // there reloads the module with the new values). Every part is on unless set off.
-const SHOW_KEYS = ['limits', 'context', 'compact_forecast', 'cache', 'cache_hits', 'session', 'last_turn', 'agents'] as const
+const SHOW_KEYS = ['limits', 'context', 'compact_forecast', 'cache', 'cache_hits', 'session', 'last_turn', 'agents', 'shells'] as const
 type Show = Record<(typeof SHOW_KEYS)[number], boolean>
 export function readShow(options: PluginOptions): Show {
   return Object.fromEntries(SHOW_KEYS.map(key => [key, options[`show_${key}`] !== false])) as Show
@@ -1076,6 +1081,7 @@ const FIELDS: readonly { field: string; label: string; options?: readonly string
   { field: 'show_session', label: 'Show session cost' },
   { field: 'show_last_turn', label: 'Show last turn' },
   { field: 'show_agents', label: 'Show running agents' },
+  { field: 'show_shells', label: 'Show background shells' },
 ]
 export const CONFIGURE_COMMAND = 'claude plugin configure usage-quota@claude-code-usage-quota-mod'
 export function givenRows(options: PluginOptions): SettingRow[] {
@@ -1140,6 +1146,160 @@ async function refreshSession($: EngineInterface): Promise<void> {
     }
   } catch (error) {
     $.ui.log(`usage-quota: session figures not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+// Background shells. The engine lists none to a mod, so the pane keeps its own,
+// from what it sees go by: a Bash call that comes back with a backgroundTaskId
+// (run in the background, or moved there by ctrl+b or a timeout) starts one; the
+// task notification (prompt.submit, and its transcript row), TaskStop, the Stop
+// hook's background_tasks or the end of the subagent that started it ends it.
+// A main-thread shell's notification waits for the tool call that is running,
+// so a shell can show as running until that call ends
+const SHELL_KEEP_MS = 10 * 60_000
+const SHELL_KEEP = 5
+// the tail of a shell's output the pane shows: its last lines, read from its last bytes
+const SHELL_LINES = 40
+const SHELL_TAIL_BYTES = 16 * 1024
+// a shell the Stop hook's list leaves out has ended, unless it started a moment
+// ago (after the list was made)
+const SHELL_GRACE_MS = 2_000
+
+// the output file the Bash result names: "Command running in background with ID:
+// b1. Output is being written to: /tmp/.../tasks/b1.output. You will be notified..."
+// (ctrl+b's text starts otherwise, the path the same)
+export function outputFileOf(text: string | undefined): string | null {
+  return text?.match(/Output is being written to: (\S+?)\.?(?:\s|$)/)?.[1] ?? null
+}
+
+export type ShellEnd = { id: string; status: Shell['status']; exitCode: number | null }
+
+// the task notifications in a prompt's text, each one a task's end: <task-id>,
+// <status>, and the exit code its summary gives ("... completed (exit code 0)")
+export function notificationsOf(text: string): ShellEnd[] {
+  const tag = (block: string, name: string) => block.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]?.trim()
+  return [...text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)].flatMap(([, block]) => {
+    const id = tag(block!, 'task-id')
+    if (!id) return []
+    const code = tag(block!, 'summary')?.match(/exit code (-?\d+)/)?.[1]
+    return [{ id, status: statusOf(tag(block!, 'status')), exitCode: code === undefined ? null : Number(code) }]
+  })
+}
+
+function statusOf(word: string | undefined): Shell['status'] {
+  return word === 'completed' || word === 'failed' || word === 'killed' ? word : 'ended'
+}
+
+// a shell's end, once: a later word on one already ended changes nothing
+export function endShell(list: Shell[], end: ShellEnd, now: number): Shell[] {
+  return list.map(sh => (sh.id === end.id && sh.status === 'running' ? { ...sh, status: end.status, exitCode: end.exitCode, endedAt: now } : sh))
+}
+
+// every running shell the engine's own list leaves out has ended
+export function endMissing(list: Shell[], running: readonly string[], now: number): Shell[] {
+  return list.map(sh =>
+    sh.status === 'running' && !running.includes(sh.id) && now - sh.startedAt >= SHELL_GRACE_MS ? { ...sh, status: 'ended', endedAt: now } : sh,
+  )
+}
+
+// the running shells, and the newest few that ended in the last 10 minutes
+export function pruneShells(list: Shell[], now: number): Shell[] {
+  const ended = list.filter(sh => sh.status !== 'running' && now - (sh.endedAt ?? now) < SHELL_KEEP_MS).slice(-SHELL_KEEP)
+  return list.filter(sh => sh.status === 'running' || ended.includes(sh))
+}
+
+// what a shell goes by: its description, else its command cut to one short line
+export function shellLabel(sh: Shell): string {
+  const text = sh.description?.trim() || sh.command.replace(/\s+/g, ' ').trim()
+  return text.length > 40 ? `${text.slice(0, 39)}…` : text
+}
+
+// how it ended, in a word or two: "exit 0", "failed (exit 1)", "killed"
+export function shellEnd(sh: Shell): string {
+  if (sh.status === 'running') return 'running'
+  if (sh.status === 'completed') return sh.exitCode === null ? 'completed' : `exit ${sh.exitCode}`
+  if (sh.status === 'failed') return sh.exitCode === null ? 'failed' : `failed (exit ${sh.exitCode})`
+  return sh.status
+}
+
+// the last lines of a shell's output as a terminal would have left them: colours
+// and other escapes taken out, a line redrawn after \r kept as last drawn
+export function outputTail(text: string, lines = SHELL_LINES): string {
+  const shown = text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g, '')
+    .split('\n')
+    .map(line => line.replace(/\r$/, '').split('\r').pop()!)
+  while (shown.length > 0 && shown[shown.length - 1] === '') shown.pop()
+  return shown.slice(-lines).join('\n')
+}
+
+// a subagent's shell that ends with its final answer ends once that agent has
+// answered (no notification reaches the main thread for it)
+export function endWithAgents(list: Shell[], answered: readonly string[], now: number): Shell[] {
+  return list.map(sh =>
+    sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null && answered.includes(sh.agentId) ? { ...sh, status: 'ended', endedAt: now } : sh,
+  )
+}
+
+async function saveShells($: EngineInterface, change: (list: Shell[], now: number) => Shell[]): Promise<void> {
+  const now = await $.clock.now()
+  const before = await read($, shells)
+  const after = pruneShells(change(before, now), now)
+  if (JSON.stringify(after) !== JSON.stringify(before)) await update($, shells, () => after)
+}
+
+// every 3s: the shells of subagents that answered end with them, the old ones go,
+// and the open shell pane reads its output again
+async function refreshShells($: EngineInterface): Promise<void> {
+  try {
+    const list = await read($, shells)
+    const tied = list.filter(sh => sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null)
+    if (tied.length > 0) {
+      const answered = (await $.agent.list()).filter(a => !RUNNING.has(a.status)).map(a => a.id)
+      await saveShells($, (l, now) => endWithAgents(l, answered, now))
+    }
+    if ((await read($, shellView)).id !== null) await loadShellOutput($)
+  } catch (error) {
+    $.ui.log(`usage-quota: shells not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+async function loadShellOutput($: EngineInterface): Promise<void> {
+  const view = await read($, shellView)
+  const sh = (await read($, shells)).find(s => s.id === view.id)
+  if (!sh?.outputFile) return
+  try {
+    const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
+    const text = size <= SHELL_TAIL_BYTES
+      ? await $.fs.read(sh.outputFile)
+      : (await $.process.run(['tail', '-c', String(SHELL_TAIL_BYTES), sh.outputFile], { timeoutMs: 5_000 })).stdout
+    const output = outputTail(text)
+    if (output !== view.output || mtimeMs !== view.outputAt || view.error !== null) {
+      await update($, shellView, v => (v.id === sh.id ? { ...v, output, outputAt: mtimeMs, error: null } : v))
+    }
+  } catch (error) {
+    const message = `output not read: ${error instanceof Error ? error.message : String(error)}`
+    if (message !== view.error) await update($, shellView, v => (v.id === sh.id ? { ...v, error: message } : v))
+  }
+}
+
+async function openShell($: EngineInterface, id: string): Promise<void> {
+  await update($, shellView, () => ({ id, output: null, outputAt: null, error: null }))
+  await loadShellOutput($)
+  await $.ui.open({ id: SHELL, title: SHELL_TITLE, focus: true, closeOnEscape: true })
+}
+
+// Stop: TaskStop, as Claude would call it (the permission check included)
+async function stopShell($: EngineInterface, id: string): Promise<void> {
+  try {
+    const answer = await $.tool.call({ tool: 'TaskStop', task_id: id })
+    if (answer.deny !== undefined || answer.isError) {
+      await update($, shellView, v => ({ ...v, error: `not stopped: ${answer.deny ?? answer.text ?? 'refused'}` }))
+      return
+    }
+    await saveShells($, (list, now) => endShell(list, { id, status: 'killed', exitCode: null }, now))
+  } catch (error) {
+    await update($, shellView, v => ({ ...v, error: `not stopped: ${error instanceof Error ? error.message : String(error)}` }))
   }
 }
 
@@ -1217,6 +1377,7 @@ export const register: Register = (on, options) => {
     $.clock.every(LOCAL_EVERY_MS, () => void refresh($))
     $.clock.every(LOCAL_EVERY_MS, () => void refreshSession($))
     void refreshSession($)
+    $.clock.every(LOCAL_EVERY_MS, () => void refreshShells($))
     $.clock.every(COLLAPSE_EVERY_MS, () => void syncCollapsed($))
     // whatever surface the session started on (a desktop chat may say none)
     await syncTheme($)
@@ -1323,8 +1484,75 @@ export const register: Register = (on, options) => {
       await update($, promptCache, c => ({ ...c, transcript: e.transcript_path }))
     }
     void detectTtl($)
+    // the engine's own list of the background work still running, the subagents'
+    // shells too: a shell of ours it leaves out has ended
+    const tasks = e.background_tasks
+    if (tasks) {
+      const running = tasks.filter(t => t.type === 'shell').map(t => t.id)
+      await saveShells($, (list, now) => endMissing(list, running, now))
+    }
     return result
   }).catch(($, e, next) => next(e)) // only reads: never holds the Stop back
+
+  // a background shell starts: a Bash call that comes back with a backgroundTaskId.
+  // Its start is the call's, so a command moved there by ctrl+b keeps its own
+  on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
+    const startedAt = await $.clock.now()
+    const answer = await next(e)
+    try {
+      const result = answer.result as { backgroundTaskId?: string; backgroundEndsWithFinalResponse?: true } | undefined
+      const id = result?.backgroundTaskId
+      if (id) {
+        const agent = e.agentId ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
+        const sh: Shell = {
+          id,
+          command: e.command,
+          description: e.description ?? null,
+          toolUseId: e.tool_use_id,
+          agentId: e.agentId ?? null,
+          agent: agent ? (agent.name ?? agent.description ?? agent.type) : null,
+          endsWithAgent: result.backgroundEndsWithFinalResponse === true,
+          outputFile: outputFileOf(answer.text),
+          startedAt,
+          status: 'running',
+          exitCode: null,
+          endedAt: null,
+        }
+        await saveShells($, list => [...list.filter(s => s.id !== id), sh])
+      }
+    } catch (error) {
+      $.ui.log(`usage-quota: shell not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+    return answer
+  }).catch(($, e, next) => next(e)) // never holds a command back
+
+  // TaskStop: the shell it names was killed (no notification follows)
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const answer = await next(e)
+    const id = (answer.result as { task_id?: string } | undefined)?.task_id
+    if (id && !answer.isError) {
+      await saveShells($, (list, now) => endShell(list, { id, status: 'killed', exitCode: null }, now)).catch(() => undefined)
+    }
+    return answer
+  }).catch(($, e, next) => next(e))
+
+  // a task notification: how a shell ended, with its exit code
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') {
+      const ends = notificationsOf(e.text)
+      if (ends.length > 0) await saveShells($, (list, now) => ends.reduce((l, end) => endShell(l, end, now), list))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // the notification's transcript row: some reach it alone, without a prompt.submit
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const task = e.props.task
+    if (task?.id && task.status && (await read($, shells)).some(sh => sh.id === task.id && sh.status === 'running')) {
+      await saveShells($, (list, now) => endShell(list, { id: task.id!, status: statusOf(task.status), exitCode: null }, now))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'quota' }, async $ => {
     const now = !(await read($, isOn))
@@ -1342,11 +1570,13 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
     if (e.id === PANE && e.origin.kind === 'person') await update($, isOn, () => false)
+    if (e.id === SHELL) await update($, shellView, () => ({ id: null, output: null, outputAt: null, error: null }))
     return result
   }).catch(($, e, next) => next(e)) // a close is never held back by this
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => drawSettings($, e))
+  on('ui.render', { component: 'Pane', requestId: SHELL }, async ($, e) => drawShell($, e))
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
 }
 
@@ -1393,6 +1623,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   const tick = await read($, fieldTick)
   const cache = await read($, promptCache)
   const info = await read($, sessionInfo)
+  const shellList = show.shells ? await read($, shells) : []
   await read($, cacheTick) // redrawn every second while the countdown shows
   const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
   const submitAt = (value: string) => commitAt($, value)
@@ -1612,15 +1843,35 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
         ))
       : null
+  // the background shells, each a button that opens its own pane: the running ones,
+  // then, dim, the ones that ended lately and how
+  const runningShells = shellList.filter(sh => sh.status === 'running')
+  const shellsLine =
+    shellList.length > 0
+      ? detailRow('Shells', [
+          <Text color={MUTED}>{runningShells.length > 0 ? `${runningShells.length} running:` : 'none running ·'}</Text>,
+          ...[...runningShells, ...shellList.filter(sh => sh.status !== 'running').reverse()].map(sh => (
+            <Box marginLeft={1}>
+              <Button
+                key={`shell:${sh.id}`}
+                label={sh.status === 'running' ? shellLabel(sh) : `${shellLabel(sh)} (${shellEnd(sh)})`}
+                plain
+                {...(sh.status === 'running' ? {} : { dimColor: true })}
+                onPress={() => openShell($, sh.id)}
+              />
+            </Box>
+          )),
+        ])
+      : null
   // In the band, where the limits and the context stand side by side, the details
   // join their columns: Session and Last turn under the limits, Cache and Compact
-  // under the context. Agents, and every row elsewhere, go in one block below
+  // under the context. Agents, Shells, and every row elsewhere, go in one block below
   const inColumns = isBand && isSplit
   const underLimits = inColumns ? [sessionLine, lastLine].filter(row => row !== null) : []
   const underContext = inColumns ? [cacheLine, forecastLine].filter(row => row !== null) : []
   // a whole blank line above, not a margin: the desktop draws margins shorter than a line
   const columnRows = (rows: typeof underLimits) => (rows.length > 0 ? <Box flexDirection="column"><Text> </Text>{rows}</Box> : null)
-  const details = (inColumns ? [agentsLine] : [cacheLine, forecastLine, sessionLine, lastLine, agentsLine]).filter(row => row !== null)
+  const details = (inColumns ? [agentsLine, shellsLine] : [cacheLine, forecastLine, sessionLine, lastLine, agentsLine, shellsLine]).filter(row => row !== null)
   const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
 
   const limitsBlock = (
@@ -1898,6 +2149,54 @@ async function drawSettings($: EngineInterface, e: RenderInput<'Pane'>): Promise
       ) : (
         <Text color={MUTED} wrap="wrap">Saved to /config. Esc closes this pane.</Text>
       )}
+    </Box>
+  )
+}
+
+// The shell pane: what one background shell runs, how long, how it ended, and the
+// last lines of its output, read again every 3s while the pane is open
+async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
+  const view = await read($, shellView)
+  const sh = (await read($, shells)).find(s => s.id === view.id)
+  if (!sh) return <Text color={MUTED} wrap="wrap">This shell ended a while ago and is no longer kept. Esc closes this pane.</Text>
+  const now = await $.clock.now()
+  const isRunning = sh.status === 'running'
+  const row = (name: string, value: string, color?: string) => (
+    <Box flexDirection="row">
+      <Box width={10} flexShrink={0}>
+        <Text bold>{name}</Text>
+      </Box>
+      <Box flexShrink={1}>
+        <Text color={color ?? MUTED} wrap="wrap">{value}</Text>
+      </Box>
+    </Box>
+  )
+  const statusColor = isRunning ? GREEN_TEXT : sh.status === 'completed' && (sh.exitCode ?? 0) === 0 ? MUTED : sh.status === 'ended' ? MUTED : AMBER
+  return (
+    <Box flexDirection="column">
+      <Text bold wrap="wrap">{sh.command}</Text>
+      {sh.description ? <Text color={MUTED} wrap="wrap">{sh.description}</Text> : null}
+      <Text> </Text>
+      {row('Status', isRunning ? `running for ${cacheLeft(now - sh.startedAt)}` : `${shellEnd(sh)} · ran ${cacheLeft((sh.endedAt ?? now) - sh.startedAt)} · ${duration(now - (sh.endedAt ?? now))} ago`, statusColor)}
+      {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}`) : null}
+      {row('ID', sh.id)}
+      {sh.outputFile ? row('Output', sh.outputFile) : null}
+      {view.outputAt !== null ? row('Changed', `${cacheLeft(Math.max(0, now - view.outputAt))} ago`) : null}
+      <Text> </Text>
+      {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
+      {view.output === null ? null : view.output === '' ? (
+        <Text color={MUTED}>No output yet.</Text>
+      ) : (
+        <Box flexDirection="column">
+          <Text bold>{`Output (last ${SHELL_LINES} lines)`}</Text>
+          {view.output.split('\n').map(line => <Text wrap="wrap">{line === '' ? ' ' : line}</Text>)}
+        </Box>
+      )}
+      <Text> </Text>
+      {isRunning ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
+      <Text color={MUTED} wrap="wrap">{isRunning ? 'A running shell can show here until the tool call in progress ends. Esc closes this pane.' : 'Esc closes this pane.'}</Text>
     </Box>
   )
 }

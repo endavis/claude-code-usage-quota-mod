@@ -18,6 +18,7 @@
     "show_cache_hits": { "type": "boolean", "title": "Show cache hit rate", "description": "How much of the last turn's input the prompt cache served", "default": true },
     "show_session": { "type": "boolean", "title": "Show session cost", "description": "What this session has cost so far, and how many prompts it has had", "default": true },
     "show_last_turn": { "type": "boolean", "title": "Show last turn", "description": "How long the last turn took, its output tokens and its model", "default": true },
-    "show_agents": { "type": "boolean", "title": "Show running agents", "description": "The subagents and teammates working right now", "default": true }
+    "show_agents": { "type": "boolean", "title": "Show running agents", "description": "The subagents and teammates working right now", "default": true },
+    "show_shells": { "type": "boolean", "title": "Show background shells", "description": "The background shells running, and the ones that ended lately; press one for its output", "default": true }
   }
 }
