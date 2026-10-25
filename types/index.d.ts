@@ -102,6 +102,8 @@ declare module 'claude-code' {
       /** the running background shells, and the ones that ended lately */
       shells: Shell[]
       shellView: ShellView
+      /** the Shells row as its count alone (kept for every chat, as isCollapsed is) */
+      shellsCollapsed: boolean
     }
   }
 }

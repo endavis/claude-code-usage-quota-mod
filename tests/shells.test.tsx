@@ -200,6 +200,36 @@ test("a subagent's shell that ends with its final answer ends once its agent has
   expect(endWithAgents([tied], ['a2'], NOW + MIN)[0]!.status).toBe('running')
 })
 
+test('Clear takes the ended shells away; the arrow collapses the row to its count', async ($, on) => {
+  const calls: string[] = []
+  world(on, calls)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await $.tool.call(BUILD)
+  // nothing ended yet: no Clear
+  expect(await ui.find({ type: 'Button', key: 'clearShells' })).toBeUndefined()
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b1' } as never)
+  await ui.press({ key: 'clearShells' })
+  expect(await ui.find({ type: 'Button', key: 'shell:b1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'shell:b2' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'clearShells' })).toBeUndefined()
+
+  expect((await ui.find({ type: 'Button', key: 'shellsCollapse' }))?.props.label).toBe('▼')
+  await ui.press({ key: 'shellsCollapse' })
+  expect((await ui.find({ type: 'Button', key: 'shellsCollapse' }))?.props.label).toBe('▲')
+  expect(await ui.find({ type: 'Text', text: '1 running' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'shell:b2' })).toBeUndefined()
+
+  // all ended, collapsed: none running
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b2' } as never)
+  expect(await ui.find({ type: 'Text', text: 'none running' })).toBeDefined()
+  await ui.press({ key: 'shellsCollapse' })
+  expect(await ui.find({ type: 'Text', text: 'none running ·' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'shell:b2' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('Show background shells off: no Shells row', { options: { show_shells: false } }, async ($, on) => {
   world(on, [])
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })

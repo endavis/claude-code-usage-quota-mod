@@ -20,6 +20,7 @@ const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
 const shells = atom({ plugin: 'usage-quota', key: 'shells' } as const, [] as Shell[])
+const shellsCollapsed = atom({ plugin: 'usage-quota', key: 'shellsCollapsed' } as const, false)
 const shellView = atom({ plugin: 'usage-quota', key: 'shellView' } as const, { id: null, output: null, outputAt: null, error: null } as ShellView)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -817,6 +818,8 @@ const COLLAPSE_EVERY_MS = 500
 async function syncCollapsed($: EngineInterface): Promise<void> {
   const saved = ((await storeGet($, 'collapsed')) as boolean | undefined) === true
   if (saved !== (await read($, isCollapsed))) await update($, isCollapsed, () => saved)
+  const shellsSaved = ((await storeGet($, 'shellsCollapsed')) as boolean | undefined) === true
+  if (shellsSaved !== (await read($, shellsCollapsed))) await update($, shellsCollapsed, () => shellsSaved)
 }
 
 // The desktop app's theme is not told to plugins: it is read from the app's own
@@ -1283,6 +1286,18 @@ async function loadShellOutput($: EngineInterface): Promise<void> {
   }
 }
 
+// Clear: the ended shells go, the running ones stay
+async function clearShells($: EngineInterface): Promise<void> {
+  await saveShells($, list => list.filter(sh => sh.status === 'running'))
+}
+
+async function toggleShells($: EngineInterface): Promise<void> {
+  // saved for the other chats first, as the band's own collapse is
+  const now = !(await read($, shellsCollapsed))
+  await storeSet($, 'shellsCollapsed', now)
+  await update($, shellsCollapsed, () => now)
+}
+
 async function openShell($: EngineInterface, id: string): Promise<void> {
   await update($, shellView, () => ({ id, output: null, outputAt: null, error: null }))
   await loadShellOutput($)
@@ -1624,6 +1639,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   const cache = await read($, promptCache)
   const info = await read($, sessionInfo)
   const shellList = show.shells ? await read($, shells) : []
+  const isShellsCollapsed = await read($, shellsCollapsed)
   await read($, cacheTick) // redrawn every second while the countdown shows
   const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
   const submitAt = (value: string) => commitAt($, value)
@@ -1844,13 +1860,19 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
         ))
       : null
   // the background shells, each a button that opens its own pane: the running ones,
-  // then, dim, the ones that ended lately and how
+  // then, dim, the ones that ended lately and how, and Clear for those. Collapsed
+  // (its arrow, as the band's own), the count alone
   const runningShells = shellList.filter(sh => sh.status === 'running')
+  const endedShells = shellList.filter(sh => sh.status !== 'running').reverse()
+  const shellCount = runningShells.length > 0 ? `${runningShells.length} running` : 'none running'
   const shellsLine =
     shellList.length > 0
       ? detailRow('Shells', [
-          <Text color={MUTED}>{runningShells.length > 0 ? `${runningShells.length} running:` : 'none running ·'}</Text>,
-          ...[...runningShells, ...shellList.filter(sh => sh.status !== 'running').reverse()].map(sh => (
+          <Box marginRight={1}>
+            <Button key="shellsCollapse" label={isShellsCollapsed ? '▲' : '▼'} plain onPress={() => toggleShells($)} />
+          </Box>,
+          <Text color={MUTED}>{isShellsCollapsed ? shellCount : runningShells.length > 0 ? `${shellCount}:` : `${shellCount} ·`}</Text>,
+          ...(isShellsCollapsed ? [] : [...runningShells, ...endedShells]).map(sh => (
             <Box marginLeft={1}>
               <Button
                 key={`shell:${sh.id}`}
@@ -1861,6 +1883,11 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
               />
             </Box>
           )),
+          !isShellsCollapsed && endedShells.length > 0 ? (
+            <Box marginLeft={1}>
+              <Button key="clearShells" label="Clear" onPress={() => clearShells($)} />
+            </Box>
+          ) : null,
         ])
       : null
   // In the band, where the limits and the context stand side by side, the details
