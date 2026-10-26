@@ -180,11 +180,13 @@ const weekday = (t: number) => new Date(t).toLocaleDateString('en-US', { weekday
 const isSameDay = (a: number, b: number) =>
   new Date(a).toLocaleDateString('en-US') === new Date(b).toLocaleDateString('en-US')
 
-// "the 8:40 PM reset" today, "Wednesday's reset" otherwise
-// the reset by its time when it is under a day away (an after-midnight one included),
-// else by its weekday: a time that far off would only lengthen the headline
-function resetName(t: number, now: number): string {
-  return t - now < 24 * 3_600_000 ? `the ${time(t)} reset` : `${weekday(t)}'s reset`
+// "the weekly reset at 8:40 PM", "the 5 hour reset at 3:00 PM", "the weekly reset on
+// Wednesday": the window named, so a weekly reset under a day away never reads as a
+// 5 hour one; by its time when it is under a day away (an after-midnight one
+// included), else by its weekday: a time that far off would only lengthen the headline
+export function resetName(f: Pick<Forecast, 'kind' | 'resetsAt'>, now: number): string {
+  const window = (WINDOWS[f.kind]?.label ?? f.kind).toLowerCase()
+  return f.resetsAt - now < 24 * 3_600_000 ? `the ${window} reset at ${time(f.resetsAt)}` : `the ${window} reset on ${weekday(f.resetsAt)}`
 }
 
 function headline(list: Forecast[], now: number): { text: string; color: string } | null {
@@ -195,12 +197,12 @@ function headline(list: Forecast[], now: number): { text: string; color: string 
   }
   const out = list.filter(f => f.status === 'out').sort((a, b) => a.runOutAt - b.runOutAt)[0]
   if (out) {
-    return { text: `At this pace you'll run out before ${resetName(out.resetsAt, now)}.`, color: out.color }
+    return { text: `At this pace you'll run out before ${resetName(out, now)}.`, color: out.color }
   }
   const lead = list.find(f => f.kind === 'seven_day' && f.status !== 'idle') ?? list.find(f => f.status !== 'idle')
   if (!lead) return null
   return {
-    text: `On track. You should reach ${resetName(lead.resetsAt, now)} with room to spare.`,
+    text: `On track. You should reach ${resetName(lead, now)} with room to spare.`,
     color: GREEN,
   }
 }

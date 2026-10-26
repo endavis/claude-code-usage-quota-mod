@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { CONFIGURE_COMMAND, cacheLeft, givenRows, lastTurnOf, modelName, nextValue, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
+import { CONFIGURE_COMMAND, cacheLeft, resetName, givenRows, lastTurnOf, modelName, nextValue, pushGrowth, readShow, seconds, transcriptPath, ttlFromTranscript, turnsUntilCompact } from '../hooks/register'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
 const MIN = 60_000
@@ -79,6 +79,13 @@ test('the cache lifetime is the newest main-thread row that wrote to the cache',
 
 test("the transcript is found where Claude Code keeps it: the directory's path with each other character as -", async () => {
   expect(transcriptPath('/home/me/.claude', '/home/me/src/my.app', 'abc')).toBe('/home/me/.claude/projects/-home-me-src-my-app/abc.jsonl')
+})
+
+test('a reset is named with its window, so a weekly one under a day away never reads as a 5 hour one', async () => {
+  const at = (ms: number) => NOW + ms
+  expect(resetName({ kind: 'seven_day', resetsAt: at(5 * HOUR) }, NOW)).toMatch(/^the weekly reset at \d{1,2}:\d{2} [AP]M$/)
+  expect(resetName({ kind: 'five_hour', resetsAt: at(2 * HOUR) }, NOW)).toMatch(/^the 5 hour reset at \d{1,2}:\d{2} [AP]M$/)
+  expect(resetName({ kind: 'seven_day', resetsAt: at(3 * 24 * HOUR) }, NOW)).toMatch(/^the weekly reset on [A-Z][a-z]+day$/)
 })
 
 test('the countdown reads to the second', async () => {

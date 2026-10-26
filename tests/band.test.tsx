@@ -106,7 +106,7 @@ test('draws the band on track' + site.suffix, site.config, async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...PANE, props: PROPS })
-    expect(await ui.find({ text: /^On track\. You should reach Wednesday's reset with room to spare\.$/ })).toBeDefined()
+    expect(await ui.find({ text: /^On track\. You should reach the weekly reset on Wednesday with room to spare\.$/ })).toBeDefined()
     expect(await ui.find({ text: '16% used' })).toBeDefined()
     expect(await ui.find({ text: '809k free of 1M' })).toBeDefined()
     expect(await ui.find({ text: 'Messages' })).toBeDefined()
@@ -173,7 +173,7 @@ test('leads with a window that will run out' + site.suffix, site.config, async (
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'usage-quota', surface, ...PANE, props: PROPS })
-    const head = await ui.find({ type: 'Text', text: /^At this pace you'll run out before the .* reset\.$/ })
+    const head = await ui.find({ type: 'Text', text: /^At this pace you'll run out before the 5 hour reset at \d{1,2}:\d{2} [AP]M\.$/ })
     expect(head?.props.color).toBe('#f87171')
     // 60% in 1h, blended with the usual pace (50% a window): 40% more takes 74m,
     // 2h 46m before the reset

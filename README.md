@@ -48,7 +48,7 @@ One row that still shows the time left until each limit resets:
 **5 Hour and Weekly limits**
 - The **% used**, matching the app's own *Plan usage limits* panel.
 - A **forecast** of where you'll be at reset: a grey tick on the bar and a note, e.g. *On pace for about 87% by reset – resets in 23m*.
-- A **headline** at a glance: *On track. You should reach Wednesday's reset with room to spare.*
+- A **headline** at a glance: *On track. You should reach the weekly reset on Wednesday with room to spare.*
 - The forecast starts from **your usual pace** (learned from your past windows) and shifts to your actual pace as the window goes on, so an early burst doesn't set it off.
 - Bars turn **amber at 75%** and **red at 90%**, or sooner if you're on course to run out.
 
