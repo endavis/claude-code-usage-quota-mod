@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { agentLabel, mergeAgents, pruneAgents, recordSpawn, recordTool, recordTurn, toolDetail } from '../hooks/register'
+import { agentLabel, agentTokens, mergeAgents, pruneAgents, recordSpawn, recordTool, recordTurn, toolDetail } from '../hooks/register'
 import type { Agent } from '../types'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
@@ -27,7 +27,7 @@ const REVIEWER: Listed = { id: 'a2', name: 'reviewer', type: 'general-purpose', 
 function agent(id: string, extra: Partial<Agent> = {}): Agent {
   return {
     id, name: null, description: 'Do it', type: 'general-purpose', status: 'running', parentId: null, spawnedBy: null, startedAt: NOW, isStartSeen: false,
-    endedAt: null, prompt: null, model: null, turns: 0, outputTokens: 0, toolCalls: 0, lastTool: null, ...extra,
+    endedAt: null, prompt: null, model: null, turns: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, toolCalls: 0, recentTools: [], ...extra,
   }
 }
 
@@ -50,8 +50,14 @@ test("a spawn gives the agent's real start, its prompt and model; turns and tool
   // a spawn before the list names it makes the agent from the spawn's own words
   expect(recordSpawn([], { id: 'a9', at: NOW, description: 'Plan it', type: 'Plan' })[0]).toMatchObject({ description: 'Plan it', type: 'Plan', status: 'running' })
 
-  const worked = recordTurn(recordTurn(recordTool(spawned, 'a1', 'Bash', 'Run the tests', NOW), 'a1', 1_200, 'claude-sonnet-5-5'), 'a1', 300, undefined)
-  expect(worked[0]).toMatchObject({ turns: 2, outputTokens: 1_500, toolCalls: 1, lastTool: { name: 'Bash', detail: 'Run the tests', at: NOW } })
+  const turn = { input_tokens: 1_000, cache_read_input_tokens: 9_000, cache_creation_input_tokens: 0, output_tokens: 1_200, model: 'claude-sonnet-5-5' }
+  const worked = recordTurn(recordTurn(recordTool(spawned, 'a1', 'Bash', 'Run the tests', NOW), 'a1', turn), 'a1', { ...turn, output_tokens: 300, model: undefined })
+  expect(worked[0]).toMatchObject({ turns: 2, inputTokens: 20_000, cacheReadTokens: 18_000, outputTokens: 1_500, model: 'claude-sonnet-5-5', toolCalls: 1, recentTools: [{ name: 'Bash', detail: 'Run the tests', at: NOW }] })
+  expect(agentTokens(worked[0]!)).toBe('2 turns · 20k in, 90% cached · 2k out')
+  // the last 5 calls are kept, all are counted
+  const busy = [1, 2, 3, 4, 5, 6, 7].reduce((l, i) => recordTool(l, 'a1', 'Read', `f${i}`, NOW + i), worked)
+  expect(busy[0]!.toolCalls).toBe(8)
+  expect(busy[0]!.recentTools.map(t => t.detail)).toEqual(['f3', 'f4', 'f5', 'f6', 'f7'])
   // a loop the pane does not know is left out
   expect(recordTool(worked, 'fork', 'Read', null, NOW)).toEqual(worked)
 })
@@ -133,7 +139,7 @@ test("each agent is a button; a press opens its pane: who it is, its start, mode
   expect(await pane.find({ type: 'Text', text: 'running for 1m 5s' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: 'Explore' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: 'sonnet-5-5' })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: '1 · 1k out' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '1 turn · 10 in, 0% cached · 1k out' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: 'Report the file.' })).toBeDefined()
   await pane.unmount()
 

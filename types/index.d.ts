@@ -91,9 +91,13 @@ export type Agent = {
   prompt: string | null
   model: string | null
   turns: number
+  /** over its turns: the input sent (cache reads and writes included), the share of it the cache served, the output */
+  inputTokens: number
+  cacheReadTokens: number
   outputTokens: number
   toolCalls: number
-  lastTool: { name: string; detail: string | null; at: number } | null
+  /** its last 5 tool calls, oldest first */
+  recentTools: { name: string; detail: string | null; at: number }[]
 }
 
 /**

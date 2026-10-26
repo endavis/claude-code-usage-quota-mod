@@ -1456,11 +1456,12 @@ async function stopShell($: EngineInterface, id: string): Promise<void> {
 // adds what it sees go by: the spawn (its start, prompt and model), the agent's
 // tool calls and its turns. An agent the list stops naming has ended
 const AGENT_GRACE_MS = 5_000
+const RECENT_TOOLS = 5
 
 function newAgent(id: string, now: number): Agent {
   return {
     id, name: null, description: '', type: '', status: 'running', parentId: null, spawnedBy: null, startedAt: now, isStartSeen: false,
-    endedAt: null, prompt: null, model: null, turns: 0, outputTokens: 0, toolCalls: 0, lastTool: null,
+    endedAt: null, prompt: null, model: null, turns: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, toolCalls: 0, recentTools: [],
   }
 }
 
@@ -1504,15 +1505,34 @@ export function recordSpawn(list: Agent[], spawn: AgentSpawn): Agent[] {
   return found ? list.map(x => (x.id === spawn.id ? spawned : x)) : [...list, spawned]
 }
 
-// one of an agent's tool calls: counted, and the last one named. A loop the pane
+// one of an agent's tool calls: counted, and kept among its last 5. A loop the pane
 // does not know (a workflow's, the engine's own forks) is left out
 export function recordTool(list: Agent[], agentId: string, name: string, detail: string | null, now: number): Agent[] {
-  return list.map(a => (a.id === agentId ? { ...a, toolCalls: a.toolCalls + 1, lastTool: { name, detail, at: now } } : a))
+  return list.map(a => (a.id === agentId ? { ...a, toolCalls: a.toolCalls + 1, recentTools: [...a.recentTools, { name, detail, at: now }].slice(-RECENT_TOOLS) } : a))
 }
 
-// one of an agent's turns: its output and its model
-export function recordTurn(list: Agent[], agentId: string, outputTokens: number, model: string | undefined): Agent[] {
-  return list.map(a => (a.id === agentId ? { ...a, turns: a.turns + 1, outputTokens: a.outputTokens + outputTokens, model: model ?? a.model } : a))
+// one of an agent's turns: its input (the cache's reads and writes included), the
+// share the cache served, its output and its model
+export function recordTurn(list: Agent[], agentId: string, usage: Pick<TurnUsage, 'input_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens' | 'output_tokens'> & { model?: string }): Agent[] {
+  const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+  return list.map(a =>
+    a.id === agentId
+      ? {
+          ...a,
+          turns: a.turns + 1,
+          inputTokens: a.inputTokens + input,
+          cacheReadTokens: a.cacheReadTokens + usage.cache_read_input_tokens,
+          outputTokens: a.outputTokens + usage.output_tokens,
+          model: usage.model ?? a.model,
+        }
+      : a,
+  )
+}
+
+// an agent's tokens: "2 turns · 48k in, 91% cached · 1.4k out"
+export function agentTokens(a: Pick<Agent, 'turns' | 'inputTokens' | 'cacheReadTokens' | 'outputTokens'>): string {
+  const cached = a.inputTokens > 0 ? `, ${Math.round((a.cacheReadTokens / a.inputTokens) * 100)}% cached` : ''
+  return `${a.turns} ${a.turns === 1 ? 'turn' : 'turns'} · ${tokens(a.inputTokens)} in${cached} · ${tokens(a.outputTokens)} out`
 }
 
 // what a tool call is about, in a few words: its description, command, file or pattern
@@ -1739,7 +1759,7 @@ export const register: Register = (on, options) => {
     // a subagent's turn is its own cache and its own figures
     const isMain = e.agentId === undefined
     const agentUsage = e.usage
-    if (!isMain && agentUsage) await saveAgents($, l => recordTurn(l, e.agentId!, agentUsage.output_tokens, agentUsage.model))
+    if (!isMain && agentUsage) await saveAgents($, l => recordTurn(l, e.agentId!, agentUsage))
     if (isMain) {
       // the last request of the turn has just read or written the cache: its
       // lifetime counts from now
@@ -2617,7 +2637,6 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
     : `${a.status} · ran ${cacheLeft((a.endedAt ?? now) - a.startedAt)}${since} · ${duration(now - (a.endedAt ?? now))} ago`
   const parent = a.parentId ? list.find(x => x.id === a.parentId) : undefined
   const startedBy = [a.parentId ? `subagent ${parent ? agentLabel(parent) : a.parentId}` : null, a.spawnedBy ? `plugin ${a.spawnedBy}` : null].filter(Boolean).join(' · ')
-  const last = a.lastTool ? `last: ${a.lastTool.name}${a.lastTool.detail ? ` ${a.lastTool.detail}` : ''} · ${cacheLeft(Math.max(0, now - a.lastTool.at))} ago` : null
   const prompt = a.prompt?.split('\n') ?? []
   // its shells, background and foreground, each opening the shell pane
   const ownShells = (await read($, shells)).filter(sh => sh.agentId === a.id)
@@ -2630,12 +2649,22 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       {a.type ? row('Type', a.type) : null}
       {startedBy ? row('Started by', startedBy) : null}
       {a.model ? row('Model', modelName(a.model)) : null}
-      {a.turns > 0 ? row('Turns', `${a.turns} · ${tokens(a.outputTokens)} out`) : null}
-      {a.toolCalls > 0 ? row('Tool calls', [`${a.toolCalls}`, last].filter(Boolean).join(' · ')) : null}
+      {a.turns > 0 ? row('Tokens', agentTokens(a)) : null}
+      {a.toolCalls > 0 ? row('Tool calls', `${a.toolCalls}`) : null}
       {row('ID', a.id)}
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
       {isRunning ? <Button key="stopAgent" label="Stop" hotkey="x" onPress={() => stopAgent($, a.id)} /> : null}
+      {a.recentTools.length > 0 ? (
+        // newest first: what it is doing now, then what it did before
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>{a.toolCalls > a.recentTools.length ? `Recent tool calls (last ${a.recentTools.length})` : 'Tool calls'}</Text>
+          {[...a.recentTools].reverse().map(t => (
+            <Text color={MUTED} wrap="wrap">{`${t.name}${t.detail ? ` ${t.detail}` : ''} · ${cacheLeft(Math.max(0, now - t.at))} ago`}</Text>
+          ))}
+        </Box>
+      ) : null}
       {ownShells.length > 0 ? (
         <Box flexDirection="column">
           <Text> </Text>
