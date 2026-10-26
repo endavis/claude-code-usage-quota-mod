@@ -1292,10 +1292,50 @@ async function saveShells($: EngineInterface, change: (list: Shell[], now: numbe
   if (JSON.stringify(after) !== JSON.stringify(before)) await update($, shells, () => after)
 }
 
-// every 3s: the shells of subagents that answered end with them, the old ones go,
-// and the open shell pane reads its output again
+// how a background shell ended, from the last line Claude Code writes to its output
+// file: "[exited with code 0]", or "[killed]"; null while it runs
+export function outputEnd(text: string): ShellEnd | null {
+  const code = text.match(/\[exited with code (-?\d+)\]\s*$/)?.[1]
+  if (code !== undefined) return { id: '', status: Number(code) === 0 ? 'completed' : 'failed', exitCode: Number(code) }
+  return /\[killed\]\s*$/.test(text) ? { id: '', status: 'killed', exitCode: null } : null
+}
+
+// the end of each running shell's output file, read again only once the file has
+// changed (its size or time): the first word of a shell's end, a subagent's too,
+// before its notification (held until the tool call in progress ends) or the Stop
+// hook's list
+const OUTPUT_END_BYTES = 128
+const outputSeen = new Map<string, string>()
+async function endFromOutput($: EngineInterface, list: Shell[]): Promise<void> {
+  const ends: ShellEnd[] = []
+  for (const sh of list) {
+    if (sh.status !== 'running' || !sh.outputFile) {
+      outputSeen.delete(sh.id)
+      continue
+    }
+    try {
+      const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
+      const stamp = `${size}:${mtimeMs}`
+      if (outputSeen.get(sh.id) === stamp) continue
+      outputSeen.set(sh.id, stamp)
+      const text = size <= SHELL_TAIL_BYTES
+        ? await $.fs.read(sh.outputFile)
+        : (await $.process.run(['tail', '-c', String(OUTPUT_END_BYTES), sh.outputFile], { timeoutMs: 5_000 })).stdout
+      const end = outputEnd(text)
+      if (end) ends.push({ ...end, id: sh.id })
+    } catch {
+      // not written yet, or gone: the other signals still end it
+    }
+  }
+  if (ends.length > 0) await saveShells($, (l, now) => ends.reduce((acc, end) => endShell(acc, end, now), l))
+}
+
+// every 3s: shells whose output file says they ended end; the shells of subagents
+// that answered end with them; the old ones go; the open shell pane reads its
+// output again
 async function refreshShells($: EngineInterface): Promise<void> {
   try {
+    await endFromOutput($, await read($, shells))
     const list = await read($, shells)
     const tied = list.filter(sh => sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null)
     if (tied.length > 0) {
@@ -2543,7 +2583,7 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
           {view.output.split('\n').map(line => <Text wrap="wrap">{line === '' ? ' ' : line}</Text>)}
         </Box>
       )}
-      <Text color={MUTED} wrap="wrap">{isRunning ? 'A running shell can show here until the tool call in progress ends. Esc closes this pane.' : 'Esc closes this pane.'}</Text>
+      <Text color={MUTED} wrap="wrap">Esc closes this pane.</Text>
     </Box>
   )
 }

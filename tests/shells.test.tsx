@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { endMissing, endShell, endWithAgents, foregroundEnd, notificationsOf, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
+import { endMissing, endShell, endWithAgents, foregroundEnd, notificationsOf, outputEnd, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
 import type { Shell } from '../types'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
@@ -311,6 +311,32 @@ test("Open runs the system's viewer on the output file, where there is a display
   await pane.press({ key: 'openOutput' })
   expect(runs.at(-1)).toBe(`sh -c xdg-open "$1" >/dev/null 2>&1 & sh ${OUTPUT}`)
   await pane.unmount()
+  await ui.unmount()
+})
+
+test("the output file's last line says how a shell ended", async () => {
+  expect(outputEnd('testing this\n\n[exited with code 0]\n')).toEqual({ id: '', status: 'completed', exitCode: 0 })
+  expect(outputEnd('boom\n[exited with code 2]\n')).toEqual({ id: '', status: 'failed', exitCode: 2 })
+  expect(outputEnd('\n[killed]\n')).toEqual({ id: '', status: 'killed', exitCode: null })
+  expect(outputEnd('step 3 of 9\n')).toBeNull()
+  // only as the last line
+  expect(outputEnd('[exited with code 0]\nmore\n')).toBeNull()
+})
+
+test('a shell ends as soon as its output file says so, with its exit code, before any notification', async ($, on) => {
+  const output = { text: 'building\n' }
+  const clock = world(on, [], output)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await clock.advance(3_000)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server')
+  output.text += '\n[exited with code 0]\n'
+  await clock.advance(3_000)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server (exit 0)')
+  // the notification that comes later changes nothing
+  await $.prompt.submit({ text: notification('b1', 'killed', ''), wait: false, origin: { kind: 'task-notification' } } as never)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server (exit 0)')
   await ui.unmount()
 })
 
