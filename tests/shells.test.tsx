@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { endMissing, endShell, endWithAgents, notificationsOf, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
+import { endMissing, endShell, endWithAgents, foregroundEnd, notificationsOf, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
 import type { Shell } from '../types'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
@@ -29,7 +29,7 @@ function notification(id: string, status: string, summary: string): string {
 function shell(id: string, extra: Partial<Shell> = {}): Shell {
   return {
     id, command: 'npm run dev', description: null, toolUseId: `toolu_${id}`, agentId: null, agent: null, endsWithAgent: false,
-    outputFile: null, startedAt: NOW, status: 'running', exitCode: null, endedAt: null, ...extra,
+    outputFile: null, isForeground: false, output: null, startedAt: NOW, status: 'running', exitCode: null, endedAt: null, ...extra,
   }
 }
 
@@ -191,6 +191,25 @@ test('TaskStop kills a shell, and the Stop hook ends one the engine no longer li
   await $.classic.Stop({ hook_event_name: 'Stop', session_id: 's1', transcript_path: '', cwd: '/work/app', stop_hook_active: false, background_tasks: [] } as never)
   expect((await ui.find({ type: 'Button', key: 'shell:b2' }))?.props.label).toBe('npm run build (ended)')
   await ui.unmount()
+})
+
+test("a subagent's foreground command: how it ended and its output, from its call's result", async () => {
+  expect(foregroundEnd({ result: { stdout: 'testing this\n', stderr: '', interrupted: false }, text: 'testing this' })).toEqual({ status: 'completed', exitCode: null, output: 'testing this\n' })
+  expect(foregroundEnd({ result: { stdout: 'out', stderr: 'boom', interrupted: false }, text: 'Error: Exit code 2\nboom', isError: true })).toEqual({ status: 'failed', exitCode: 2, output: 'out\nboom' })
+  expect(foregroundEnd({ result: { stdout: '', stderr: '', interrupted: true }, text: '' }).status).toBe('killed')
+  // a result with no record: its text
+  expect(foregroundEnd({ text: 'Exit code 1', isError: true })).toEqual({ status: 'failed', exitCode: 1, output: 'Exit code 1' })
+  expect(foregroundEnd({ result: { stdout: 'x'.repeat(70 * 1024) } }).output.length).toBe(64 * 1024)
+})
+
+test('foreground commands are kept apart: the Stop list never ends them, and they never push a background shell out', async () => {
+  const fg = shell('fg:t1', { isForeground: true, agentId: 'a1' })
+  expect(endMissing([fg], [], NOW + MIN)[0]!.status).toBe('running')
+  const background = shell('b1', { status: 'completed', endedAt: NOW })
+  const quick = Array.from({ length: 12 }, (_, i) => shell(`fg:${i}`, { isForeground: true, status: 'completed', endedAt: NOW }))
+  const kept = pruneShells([background, ...quick], NOW + MIN).map(s => s.id)
+  expect(kept[0]).toBe('b1')
+  expect(kept.length).toBe(11)
 })
 
 test("a subagent's shell that ends with its final answer ends once its agent has answered", async () => {

@@ -59,6 +59,12 @@ export type Shell = {
   /** killed with the subagent that started it when that agent answers */
   endsWithAgent: boolean
   outputFile: string | null
+  /**
+   * a subagent's foreground command, not a background task: shown while it runs,
+   * its stdout and stderr kept from its result (it has no output file)
+   */
+  isForeground: boolean
+  output: string | null
   startedAt: number
   status: 'running' | 'completed' | 'failed' | 'killed' | 'ended'
   exitCode: number | null

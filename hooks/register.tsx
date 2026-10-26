@@ -1166,6 +1166,10 @@ async function refreshSession($: EngineInterface): Promise<void> {
 // so a shell can show as running until that call ends
 const SHELL_KEEP_MS = 10 * 60_000
 const SHELL_KEEP = 5
+// a subagent's foreground commands that ended: more of them, they come quickly
+const SHELL_KEEP_FOREGROUND = 10
+// what is kept of a foreground command's output: its last 64 KB
+const SHELL_KEPT_BYTES = 64 * 1024
 // the tail of a shell's output the pane shows: its last lines, read from its last bytes
 const SHELL_LINES = 40
 const SHELL_TAIL_BYTES = 16 * 1024
@@ -1208,19 +1212,26 @@ export function endShell(list: Shell[], end: ShellEnd, now: number): Shell[] {
 
 // every running shell the engine's own list leaves out has ended
 export function endMissing(list: Shell[], running: readonly string[], now: number): Shell[] {
+  // a foreground command is no background task: the list never names it
   return list.map(sh =>
-    sh.status === 'running' && !running.includes(sh.id) && now - sh.startedAt >= SHELL_GRACE_MS ? { ...sh, status: 'ended', endedAt: now } : sh,
+    sh.status === 'running' && !sh.isForeground && !running.includes(sh.id) && now - sh.startedAt >= SHELL_GRACE_MS ? { ...sh, status: 'ended', endedAt: now } : sh,
   )
 }
 
 // the running shells, and the newest few that ended in the last 10 minutes
 export function pruneShells(list: Shell[], now: number): Shell[] {
-  return keepRecent(list, now, sh => sh.status === 'running')
+  // kept apart, so a subagent's quick commands never push a background shell out
+  const isRunning = (sh: Shell) => sh.status === 'running'
+  const kept = [
+    ...keepRecent(list.filter(sh => !sh.isForeground), now, isRunning),
+    ...keepRecent(list.filter(sh => sh.isForeground), now, isRunning, SHELL_KEEP_FOREGROUND),
+  ]
+  return list.filter(sh => kept.includes(sh))
 }
 
 // the running ones, and the newest few of the others that ended in the last 10 minutes
-function keepRecent<T extends { endedAt: number | null }>(list: T[], now: number, isRunning: (item: T) => boolean): T[] {
-  const ended = list.filter(item => !isRunning(item) && now - (item.endedAt ?? now) < SHELL_KEEP_MS).slice(-SHELL_KEEP)
+function keepRecent<T extends { endedAt: number | null }>(list: T[], now: number, isRunning: (item: T) => boolean, keep = SHELL_KEEP): T[] {
+  const ended = list.filter(item => !isRunning(item) && now - (item.endedAt ?? now) < SHELL_KEEP_MS).slice(-keep)
   return list.filter(item => isRunning(item) || ended.includes(item))
 }
 
@@ -1251,6 +1262,23 @@ export function outputTail(text: string, lines = SHELL_LINES): string {
 
 // a subagent's shell that ends with its final answer ends once that agent has
 // answered (no notification reaches the main thread for it)
+// how a foreground command ended, from its call's result: interrupted, failed (with
+// the exit code its text gives, "Exit code 2"), else completed; and its output, the
+// last 64 KB of its stdout and stderr
+export function foregroundEnd(answer: { result?: unknown; text?: string; isError?: boolean }): { status: Shell['status']; exitCode: number | null; output: string } {
+  const result = (answer.result ?? {}) as { stdout?: unknown; stderr?: unknown; interrupted?: unknown }
+  const code = answer.isError ? answer.text?.match(/exit code (-?\d+)/i)?.[1] : undefined
+  const parts = typeof result.stdout === 'string' || typeof result.stderr === 'string'
+    ? [result.stdout, result.stderr].filter((p): p is string => typeof p === 'string' && p !== '')
+    : [answer.text ?? '']
+  const output = parts.join('\n')
+  return {
+    status: result.interrupted === true ? 'killed' : answer.isError ? 'failed' : 'completed',
+    exitCode: code === undefined ? null : Number(code),
+    output: output.length > SHELL_KEPT_BYTES ? output.slice(-SHELL_KEPT_BYTES) : output,
+  }
+}
+
 export function endWithAgents(list: Shell[], answered: readonly string[], now: number): Shell[] {
   return list.map(sh =>
     sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null && answered.includes(sh.agentId) ? { ...sh, status: 'ended', endedAt: now } : sh,
@@ -1283,6 +1311,12 @@ async function refreshShells($: EngineInterface): Promise<void> {
 async function loadShellOutput($: EngineInterface): Promise<void> {
   const view = await read($, shellView)
   const sh = (await read($, shells)).find(s => s.id === view.id)
+  if (sh && !sh.outputFile && sh.output !== null) {
+    // a foreground command's output, kept from its result
+    const output = outputTail(sh.output, view.isFull ? SHELL_FULL_LINES : SHELL_LINES)
+    if (output !== view.output) await update($, shellView, v => (v.id === sh.id ? { ...v, output, skipped: 0, outputAt: sh.endedAt, error: null } : v))
+    return
+  }
   if (!sh?.outputFile) return
   try {
     const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
@@ -1707,29 +1741,51 @@ export const register: Register = (on, options) => {
 
   // a background shell starts: a Bash call that comes back with a backgroundTaskId.
   // Its start is the call's, so a command moved there by ctrl+b keeps its own
+  // A subagent's foreground command is one too, from its call to its result: its
+  // output reaches no transcript the person sees
   on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
     const startedAt = await $.clock.now()
+    const shellOf = async (id: string, extra: Partial<Shell>): Promise<Shell> => {
+      const known = e.agentId ? (await read($, agents)).find(a => a.id === e.agentId) : undefined
+      const listed = e.agentId && !known ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
+      return {
+        id,
+        command: e.command,
+        description: e.description ?? null,
+        toolUseId: e.tool_use_id,
+        agentId: e.agentId ?? null,
+        agent: known ? agentLabel(known) : listed ? (listed.name ?? listed.description ?? listed.type) : null,
+        endsWithAgent: false,
+        outputFile: null,
+        isForeground: false,
+        output: null,
+        startedAt,
+        status: 'running',
+        exitCode: null,
+        endedAt: null,
+        ...extra,
+      }
+    }
+    const foreground = e.agentId && (e as { run_in_background?: boolean }).run_in_background !== true ? `fg:${e.tool_use_id}` : null
+    if (foreground) {
+      try {
+        const sh = await shellOf(foreground, { isForeground: true })
+        await saveShells($, list => [...list.filter(s => s.id !== foreground), sh])
+      } catch (error) {
+        $.ui.log(`usage-quota: command not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+      }
+    }
     const answer = await next(e)
     try {
       const result = answer.result as { backgroundTaskId?: string; backgroundEndsWithFinalResponse?: true } | undefined
       const id = result?.backgroundTaskId
       if (id) {
-        const agent = e.agentId ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
-        const sh: Shell = {
-          id,
-          command: e.command,
-          description: e.description ?? null,
-          toolUseId: e.tool_use_id,
-          agentId: e.agentId ?? null,
-          agent: agent ? (agent.name ?? agent.description ?? agent.type) : null,
-          endsWithAgent: result.backgroundEndsWithFinalResponse === true,
-          outputFile: outputFileOf(answer.text),
-          startedAt,
-          status: 'running',
-          exitCode: null,
-          endedAt: null,
-        }
-        await saveShells($, list => [...list.filter(s => s.id !== id), sh])
+        // in the background (a timeout or ctrl+b moved it there): a task of its own
+        const sh = await shellOf(id, { endsWithAgent: result.backgroundEndsWithFinalResponse === true, outputFile: outputFileOf(answer.text) })
+        await saveShells($, list => [...list.filter(s => s.id !== id && s.id !== foreground), sh])
+      } else if (foreground) {
+        const end = foregroundEnd(answer)
+        await saveShells($, (list, now) => list.map(s => (s.id === foreground && s.status === 'running' ? { ...s, ...end, endedAt: now } : s)))
       }
     } catch (error) {
       $.ui.log(`usage-quota: shell not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
@@ -2126,12 +2182,13 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           onToggle: () => void toggleAgents($), onClear: () => void clearAgents($), onOpen: id => void openAgent($, id),
         })
       : null
+  // a subagent's foreground commands show while they run; once ended, in its pane
   const runningShells = shellList.filter(sh => sh.status === 'running')
   const shellsLine =
-    shellList.length > 0
+    shellList.some(sh => sh.status === 'running' || !sh.isForeground)
       ? taskRow({
           name: 'Shells', prefix: 'shell', isCollapsed: isShellsCollapsed,
-          running: runningShells, ended: shellList.filter(sh => sh.status !== 'running').reverse(),
+          running: runningShells, ended: shellList.filter(sh => sh.status !== 'running' && !sh.isForeground).reverse(),
           label: sh => (sh.status === 'running' ? shellLabel(sh) : `${shellLabel(sh)} (${shellEnd(sh)})`),
           onToggle: () => void toggleShells($), onClear: () => void clearShells($), onOpen: id => void openShell($, id),
         })
@@ -2461,21 +2518,22 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       {sh.description ? <Text color={MUTED} wrap="wrap">{sh.description}</Text> : null}
       <Text> </Text>
       {row('Status', isRunning ? `running for ${cacheLeft(now - sh.startedAt)}` : `${shellEnd(sh)} · ran ${cacheLeft((sh.endedAt ?? now) - sh.startedAt)} · ${duration(now - (sh.endedAt ?? now))} ago`, statusColor)}
-      {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}`) : null}
+      {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}${sh.isForeground ? ', in the foreground' : ''}`) : null}
       {row('ID', sh.id)}
       {sh.outputFile ? row('Output', sh.outputFile) : null}
       {view.outputAt !== null ? row('Changed', `${cacheLeft(Math.max(0, now - view.outputAt))} ago`) : null}
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
-      {sh.outputFile ? (
+      {sh.outputFile || sh.output !== null ? (
         <Box flexDirection="row" columnGap={1} flexWrap="wrap">
           <Button key="fullOutput" label={view.isFull ? `Last ${SHELL_LINES} lines` : 'Full output'} hotkey="f" onPress={() => toggleFullOutput($)} />
-          {viewer ? <Button key="openOutput" label="Open" hotkey="o" onPress={() => openOutput($, sh.outputFile!)} /> : null}
-          {isRunning ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
+          {viewer && sh.outputFile ? <Button key="openOutput" label="Open" hotkey="o" onPress={() => openOutput($, sh.outputFile!)} /> : null}
+          {isRunning && !sh.isForeground ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
         </Box>
-      ) : isRunning ? (
+      ) : isRunning && !sh.isForeground ? (
         <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} />
       ) : null}
+      {sh.isForeground && isRunning ? <Text color={MUTED} wrap="wrap">A foreground command has no output file: its output shows here when it ends.</Text> : null}
       <Text> </Text>
       {view.output === null ? null : view.output === '' ? (
         <Text color={MUTED}>No output yet.</Text>
@@ -2519,6 +2577,8 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
   const startedBy = [a.parentId ? `subagent ${parent ? agentLabel(parent) : a.parentId}` : null, a.spawnedBy ? `plugin ${a.spawnedBy}` : null].filter(Boolean).join(' · ')
   const last = a.lastTool ? `last: ${a.lastTool.name}${a.lastTool.detail ? ` ${a.lastTool.detail}` : ''} · ${cacheLeft(Math.max(0, now - a.lastTool.at))} ago` : null
   const prompt = a.prompt?.split('\n') ?? []
+  // its shells, background and foreground, each opening the shell pane
+  const ownShells = (await read($, shells)).filter(sh => sh.agentId === a.id)
   return (
     <Box flexDirection="column">
       <Text bold wrap="wrap">{a.name ?? (a.description || a.type)}</Text>
@@ -2534,6 +2594,21 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
       {isRunning ? <Button key="stopAgent" label="Stop" hotkey="x" onPress={() => stopAgent($, a.id)} /> : null}
+      {ownShells.length > 0 ? (
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>Shells</Text>
+          {ownShells.map(sh => (
+            <Button
+              key={`agentShell:${sh.id}`}
+              label={`${shellLabel(sh)} (${sh.isForeground ? 'foreground, ' : ''}${shellEnd(sh)})`}
+              plain
+              {...(sh.status === 'running' ? {} : { dimColor: true })}
+              onPress={() => openShell($, sh.id)}
+            />
+          ))}
+        </Box>
+      ) : null}
       {prompt.length > 0 ? (
         <Box flexDirection="column">
           <Text> </Text>
