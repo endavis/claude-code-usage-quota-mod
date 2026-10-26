@@ -361,7 +361,7 @@ for (const surface of ['desktop', 'terminal'] as const) {
     expect(await ui.find({ type: 'Text', text: 'Placement: bottom' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '[ ] Show cache countdown' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '[x] Show plan limits' })).toBeDefined()
-    expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(10)
+    expect((await ui.findAll({ type: 'Text', text: /^(\[[x ]\] |Placement: )/ })).length).toBe(11)
     // nothing to press: /config would refuse a key it has no row for
     expect(await ui.find({ type: 'Button' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'Type /reload-plugins once to make these clickable' })).toBeDefined()
@@ -387,6 +387,7 @@ test('the read-only list names every userConfig field, with its title', async ()
     'usage-quota.show_last_turn=Show last turn',
     'usage-quota.show_agents=Show running agents',
     'usage-quota.show_shells=Show background shells',
+    'usage-quota.show_monitors=Show monitors',
   ])
 })
 
