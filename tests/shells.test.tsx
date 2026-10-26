@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { endMissing, endShell, endWithAgents, notificationsOf, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
+import { endMissing, endShell, endWithAgents, foregroundEnd, notificationsOf, outputEnd, outputFileOf, outputHeading, outputTail, pruneShells, shellEnd, shellLabel } from '../hooks/register'
 import type { Shell } from '../types'
 
 const NOW = Date.parse('2026-10-04T06:00:00Z')
@@ -29,7 +29,7 @@ function notification(id: string, status: string, summary: string): string {
 function shell(id: string, extra: Partial<Shell> = {}): Shell {
   return {
     id, command: 'npm run dev', description: null, toolUseId: `toolu_${id}`, agentId: null, agent: null, endsWithAgent: false,
-    outputFile: null, startedAt: NOW, status: 'running', exitCode: null, endedAt: null, ...extra,
+    outputFile: null, isForeground: false, output: null, startedAt: NOW, status: 'running', exitCode: null, endedAt: null, ...extra,
   }
 }
 
@@ -193,6 +193,25 @@ test('TaskStop kills a shell, and the Stop hook ends one the engine no longer li
   await ui.unmount()
 })
 
+test("a subagent's foreground command: how it ended and its output, from its call's result", async () => {
+  expect(foregroundEnd({ result: { stdout: 'testing this\n', stderr: '', interrupted: false }, text: 'testing this' })).toEqual({ status: 'completed', exitCode: null, output: 'testing this\n' })
+  expect(foregroundEnd({ result: { stdout: 'out', stderr: 'boom', interrupted: false }, text: 'Error: Exit code 2\nboom', isError: true })).toEqual({ status: 'failed', exitCode: 2, output: 'out\nboom' })
+  expect(foregroundEnd({ result: { stdout: '', stderr: '', interrupted: true }, text: '' }).status).toBe('killed')
+  // a result with no record: its text
+  expect(foregroundEnd({ text: 'Exit code 1', isError: true })).toEqual({ status: 'failed', exitCode: 1, output: 'Exit code 1' })
+  expect(foregroundEnd({ result: { stdout: 'x'.repeat(70 * 1024) } }).output.length).toBe(64 * 1024)
+})
+
+test('foreground commands are kept apart: the Stop list never ends them, and they never push a background shell out', async () => {
+  const fg = shell('fg:t1', { isForeground: true, agentId: 'a1' })
+  expect(endMissing([fg], [], NOW + MIN)[0]!.status).toBe('running')
+  const background = shell('b1', { status: 'completed', endedAt: NOW })
+  const quick = Array.from({ length: 12 }, (_, i) => shell(`fg:${i}`, { isForeground: true, status: 'completed', endedAt: NOW }))
+  const kept = pruneShells([background, ...quick], NOW + MIN).map(s => s.id)
+  expect(kept[0]).toBe('b1')
+  expect(kept.length).toBe(11)
+})
+
 test("a subagent's shell that ends with its final answer ends once its agent has answered", async () => {
   const tied = shell('b9', { agentId: 'a1', agent: 'reviewer', endsWithAgent: true })
   const outlives = shell('b8', { agentId: 'a1', agent: 'reviewer' })
@@ -292,6 +311,32 @@ test("Open runs the system's viewer on the output file, where there is a display
   await pane.press({ key: 'openOutput' })
   expect(runs.at(-1)).toBe(`sh -c xdg-open "$1" >/dev/null 2>&1 & sh ${OUTPUT}`)
   await pane.unmount()
+  await ui.unmount()
+})
+
+test("the output file's last line says how a shell ended", async () => {
+  expect(outputEnd('testing this\n\n[exited with code 0]\n')).toEqual({ id: '', status: 'completed', exitCode: 0 })
+  expect(outputEnd('boom\n[exited with code 2]\n')).toEqual({ id: '', status: 'failed', exitCode: 2 })
+  expect(outputEnd('\n[killed]\n')).toEqual({ id: '', status: 'killed', exitCode: null })
+  expect(outputEnd('step 3 of 9\n')).toBeNull()
+  // only as the last line
+  expect(outputEnd('[exited with code 0]\nmore\n')).toBeNull()
+})
+
+test('a shell ends as soon as its output file says so, with its exit code, before any notification', async ($, on) => {
+  const output = { text: 'building\n' }
+  const clock = world(on, [], output)
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'usage-quota', surface: 'terminal', ...PANE, props: PROPS })
+  await $.tool.call(BASH)
+  await clock.advance(3_000)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server')
+  output.text += '\n[exited with code 0]\n'
+  await clock.advance(3_000)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server (exit 0)')
+  // the notification that comes later changes nothing
+  await $.prompt.submit({ text: notification('b1', 'killed', ''), wait: false, origin: { kind: 'task-notification' } } as never)
+  expect((await ui.find({ type: 'Button', key: 'shell:b1' }))?.props.label).toBe('Start the dev server (exit 0)')
   await ui.unmount()
 })
 

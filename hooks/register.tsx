@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, RenderChildren, RenderElement, RenderInput, SessionRateLimit, TurnUsage } from 'claude-code'
 
-import type { AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, QuotaSettings, SessionInfo, SettingRow, Shell, ShellView, Snapshot } from '../types'
+import type { Agent, AutoCompact, Category, Hold, LastTurn, Limit, PaceOf, PromptCache, QuotaSettings, SessionInfo, SettingRow, Shell, ShellView, Snapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-quota', key: 'snapshot' } as const, null)
 const isOn = atom({ plugin: 'usage-quota', key: 'isOn' } as const, true)
@@ -18,9 +18,12 @@ const hold = atom({ plugin: 'usage-quota', key: 'hold' } as const, { chat: '', w
 const promptCache = atom({ plugin: 'usage-quota', key: 'promptCache' } as const, { lastAt: null, ttlMs: null, transcript: null } as PromptCache)
 const cacheTick = atom({ plugin: 'usage-quota', key: 'cacheTick' } as const, 0)
 const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { rows: [], error: null, isReadOnly: false } as QuotaSettings)
-const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, agents: [], growth: [] } as SessionInfo)
+const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, growth: [] } as SessionInfo)
 const shells = atom({ plugin: 'usage-quota', key: 'shells' } as const, [] as Shell[])
 const shellsCollapsed = atom({ plugin: 'usage-quota', key: 'shellsCollapsed' } as const, false)
+const agents = atom({ plugin: 'usage-quota', key: 'agents' } as const, [] as Agent[])
+const agentView = atom({ plugin: 'usage-quota', key: 'agentView' } as const, { id: null, error: null } as { id: string | null; error: string | null })
+const agentsCollapsed = atom({ plugin: 'usage-quota', key: 'agentsCollapsed' } as const, false)
 const shellView = atom({ plugin: 'usage-quota', key: 'shellView' } as const, { id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null } as ShellView)
 
 // drawn where the `placement` option says: `right`, a pane, which docks beside the
@@ -34,6 +37,9 @@ const SETTINGS_TITLE = 'Quota settings'
 // a third, opened from the Shells row: one background shell, its output's tail
 const SHELL = 'usage-quota-shell'
 const SHELL_TITLE = 'Shell'
+// a fourth, opened from the Agents row: one subagent or teammate
+const AGENT = 'usage-quota-agent'
+const AGENT_TITLE = 'Agent'
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -174,11 +180,13 @@ const weekday = (t: number) => new Date(t).toLocaleDateString('en-US', { weekday
 const isSameDay = (a: number, b: number) =>
   new Date(a).toLocaleDateString('en-US') === new Date(b).toLocaleDateString('en-US')
 
-// "the 8:40 PM reset" today, "Wednesday's reset" otherwise
-// the reset by its time when it is under a day away (an after-midnight one included),
-// else by its weekday: a time that far off would only lengthen the headline
-function resetName(t: number, now: number): string {
-  return t - now < 24 * 3_600_000 ? `the ${time(t)} reset` : `${weekday(t)}'s reset`
+// "the weekly reset at 8:40 PM", "the 5 hour reset at 3:00 PM", "the weekly reset on
+// Wednesday": the window named, so a weekly reset under a day away never reads as a
+// 5 hour one; by its time when it is under a day away (an after-midnight one
+// included), else by its weekday: a time that far off would only lengthen the headline
+export function resetName(f: Pick<Forecast, 'kind' | 'resetsAt'>, now: number): string {
+  const window = (WINDOWS[f.kind]?.label ?? f.kind).toLowerCase()
+  return f.resetsAt - now < 24 * 3_600_000 ? `the ${window} reset at ${time(f.resetsAt)}` : `the ${window} reset on ${weekday(f.resetsAt)}`
 }
 
 function headline(list: Forecast[], now: number): { text: string; color: string } | null {
@@ -189,12 +197,12 @@ function headline(list: Forecast[], now: number): { text: string; color: string 
   }
   const out = list.filter(f => f.status === 'out').sort((a, b) => a.runOutAt - b.runOutAt)[0]
   if (out) {
-    return { text: `At this pace you'll run out before ${resetName(out.resetsAt, now)}.`, color: out.color }
+    return { text: `At this pace you'll run out before ${resetName(out, now)}.`, color: out.color }
   }
   const lead = list.find(f => f.kind === 'seven_day' && f.status !== 'idle') ?? list.find(f => f.status !== 'idle')
   if (!lead) return null
   return {
-    text: `On track. You should reach ${resetName(lead.resetsAt, now)} with room to spare.`,
+    text: `On track. You should reach ${resetName(lead, now)} with room to spare.`,
     color: GREEN,
   }
 }
@@ -820,6 +828,8 @@ async function syncCollapsed($: EngineInterface): Promise<void> {
   if (saved !== (await read($, isCollapsed))) await update($, isCollapsed, () => saved)
   const shellsSaved = ((await storeGet($, 'shellsCollapsed')) as boolean | undefined) === true
   if (shellsSaved !== (await read($, shellsCollapsed))) await update($, shellsCollapsed, () => shellsSaved)
+  const agentsSaved = ((await storeGet($, 'agentsCollapsed')) as boolean | undefined) === true
+  if (agentsSaved !== (await read($, agentsCollapsed))) await update($, agentsCollapsed, () => agentsSaved)
 }
 
 // The desktop app's theme is not told to plugins: it is read from the app's own
@@ -1133,19 +1143,16 @@ export function pushGrowth(growth: number[], tokens: number): number[] {
   return last !== undefined && tokens < last ? [tokens] : [...growth, tokens].slice(-8)
 }
 
-// the session's cost, prompts and running agents, looked at every 3s; written only
+// the session's cost and prompts, looked at every 3s; written only
 // when something changed, so an idle pane is not redrawn for nothing
 const RUNNING = new Set(['pending', 'running', 'waiting'])
 async function refreshSession($: EngineInterface): Promise<void> {
   try {
     const costUsd = show.session ? ((await $.session.usage()).cost?.usd ?? null) : null
     const turns = show.session ? await $.session.turns() : null
-    const agents = show.agents
-      ? (await $.agent.list()).filter(a => RUNNING.has(a.status)).map(a => a.name ?? a.type ?? a.description)
-      : []
     const info = await read($, sessionInfo)
-    if (info.costUsd !== costUsd || info.turns !== turns || JSON.stringify(info.agents) !== JSON.stringify(agents)) {
-      await update($, sessionInfo, i => ({ ...i, costUsd, turns, agents }))
+    if (info.costUsd !== costUsd || info.turns !== turns) {
+      await update($, sessionInfo, i => ({ ...i, costUsd, turns }))
     }
   } catch (error) {
     $.ui.log(`usage-quota: session figures not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
@@ -1155,12 +1162,17 @@ async function refreshSession($: EngineInterface): Promise<void> {
 // Background shells. The engine lists none to a mod, so the pane keeps its own,
 // from what it sees go by: a Bash call that comes back with a backgroundTaskId
 // (run in the background, or moved there by ctrl+b or a timeout) starts one; the
-// task notification (prompt.submit, and its transcript row), TaskStop, the Stop
-// hook's background_tasks or the end of the subagent that started it ends it.
-// A main-thread shell's notification waits for the tool call that is running,
-// so a shell can show as running until that call ends
+// last line of its output file ends it, else the task notification
+// (prompt.submit), TaskStop, the Stop hook's background_tasks or the end of the
+// subagent that started it. Nothing here reads state from a transcript row's
+// ui.render: a row that reads a value is drawn again whenever it changes, every
+// row of the transcript at once
 const SHELL_KEEP_MS = 10 * 60_000
 const SHELL_KEEP = 5
+// a subagent's foreground commands that ended: more of them, they come quickly
+const SHELL_KEEP_FOREGROUND = 10
+// what is kept of a foreground command's output: its last 64 KB
+const SHELL_KEPT_BYTES = 64 * 1024
 // the tail of a shell's output the pane shows: its last lines, read from its last bytes
 const SHELL_LINES = 40
 const SHELL_TAIL_BYTES = 16 * 1024
@@ -1203,15 +1215,27 @@ export function endShell(list: Shell[], end: ShellEnd, now: number): Shell[] {
 
 // every running shell the engine's own list leaves out has ended
 export function endMissing(list: Shell[], running: readonly string[], now: number): Shell[] {
+  // a foreground command is no background task: the list never names it
   return list.map(sh =>
-    sh.status === 'running' && !running.includes(sh.id) && now - sh.startedAt >= SHELL_GRACE_MS ? { ...sh, status: 'ended', endedAt: now } : sh,
+    sh.status === 'running' && !sh.isForeground && !running.includes(sh.id) && now - sh.startedAt >= SHELL_GRACE_MS ? { ...sh, status: 'ended', endedAt: now } : sh,
   )
 }
 
 // the running shells, and the newest few that ended in the last 10 minutes
 export function pruneShells(list: Shell[], now: number): Shell[] {
-  const ended = list.filter(sh => sh.status !== 'running' && now - (sh.endedAt ?? now) < SHELL_KEEP_MS).slice(-SHELL_KEEP)
-  return list.filter(sh => sh.status === 'running' || ended.includes(sh))
+  // kept apart, so a subagent's quick commands never push a background shell out
+  const isRunning = (sh: Shell) => sh.status === 'running'
+  const kept = [
+    ...keepRecent(list.filter(sh => !sh.isForeground), now, isRunning),
+    ...keepRecent(list.filter(sh => sh.isForeground), now, isRunning, SHELL_KEEP_FOREGROUND),
+  ]
+  return list.filter(sh => kept.includes(sh))
+}
+
+// the running ones, and the newest few of the others that ended in the last 10 minutes
+function keepRecent<T extends { endedAt: number | null }>(list: T[], now: number, isRunning: (item: T) => boolean, keep = SHELL_KEEP): T[] {
+  const ended = list.filter(item => !isRunning(item) && now - (item.endedAt ?? now) < SHELL_KEEP_MS).slice(-keep)
+  return list.filter(item => isRunning(item) || ended.includes(item))
 }
 
 // what a shell goes by: its description, else its command cut to one short line
@@ -1241,6 +1265,23 @@ export function outputTail(text: string, lines = SHELL_LINES): string {
 
 // a subagent's shell that ends with its final answer ends once that agent has
 // answered (no notification reaches the main thread for it)
+// how a foreground command ended, from its call's result: interrupted, failed (with
+// the exit code its text gives, "Exit code 2"), else completed; and its output, the
+// last 64 KB of its stdout and stderr
+export function foregroundEnd(answer: { result?: unknown; text?: string; isError?: boolean }): { status: Shell['status']; exitCode: number | null; output: string } {
+  const result = (answer.result ?? {}) as { stdout?: unknown; stderr?: unknown; interrupted?: unknown }
+  const code = answer.isError ? answer.text?.match(/exit code (-?\d+)/i)?.[1] : undefined
+  const parts = typeof result.stdout === 'string' || typeof result.stderr === 'string'
+    ? [result.stdout, result.stderr].filter((p): p is string => typeof p === 'string' && p !== '')
+    : [answer.text ?? '']
+  const output = parts.join('\n')
+  return {
+    status: result.interrupted === true ? 'killed' : answer.isError ? 'failed' : 'completed',
+    exitCode: code === undefined ? null : Number(code),
+    output: output.length > SHELL_KEPT_BYTES ? output.slice(-SHELL_KEPT_BYTES) : output,
+  }
+}
+
 export function endWithAgents(list: Shell[], answered: readonly string[], now: number): Shell[] {
   return list.map(sh =>
     sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null && answered.includes(sh.agentId) ? { ...sh, status: 'ended', endedAt: now } : sh,
@@ -1254,10 +1295,50 @@ async function saveShells($: EngineInterface, change: (list: Shell[], now: numbe
   if (JSON.stringify(after) !== JSON.stringify(before)) await update($, shells, () => after)
 }
 
-// every 3s: the shells of subagents that answered end with them, the old ones go,
-// and the open shell pane reads its output again
+// how a background shell ended, from the last line Claude Code writes to its output
+// file: "[exited with code 0]", or "[killed]"; null while it runs
+export function outputEnd(text: string): ShellEnd | null {
+  const code = text.match(/\[exited with code (-?\d+)\]\s*$/)?.[1]
+  if (code !== undefined) return { id: '', status: Number(code) === 0 ? 'completed' : 'failed', exitCode: Number(code) }
+  return /\[killed\]\s*$/.test(text) ? { id: '', status: 'killed', exitCode: null } : null
+}
+
+// the end of each running shell's output file, read again only once the file has
+// changed (its size or time): the first word of a shell's end, a subagent's too,
+// before its notification (held until the tool call in progress ends) or the Stop
+// hook's list
+const OUTPUT_END_BYTES = 128
+const outputSeen = new Map<string, string>()
+async function endFromOutput($: EngineInterface, list: Shell[]): Promise<void> {
+  const ends: ShellEnd[] = []
+  for (const sh of list) {
+    if (sh.status !== 'running' || !sh.outputFile) {
+      outputSeen.delete(sh.id)
+      continue
+    }
+    try {
+      const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
+      const stamp = `${size}:${mtimeMs}`
+      if (outputSeen.get(sh.id) === stamp) continue
+      outputSeen.set(sh.id, stamp)
+      const text = size <= SHELL_TAIL_BYTES
+        ? await $.fs.read(sh.outputFile)
+        : (await $.process.run(['tail', '-c', String(OUTPUT_END_BYTES), sh.outputFile], { timeoutMs: 5_000 })).stdout
+      const end = outputEnd(text)
+      if (end) ends.push({ ...end, id: sh.id })
+    } catch {
+      // not written yet, or gone: the other signals still end it
+    }
+  }
+  if (ends.length > 0) await saveShells($, (l, now) => ends.reduce((acc, end) => endShell(acc, end, now), l))
+}
+
+// every 3s: shells whose output file says they ended end; the shells of subagents
+// that answered end with them; the old ones go; the open shell pane reads its
+// output again
 async function refreshShells($: EngineInterface): Promise<void> {
   try {
+    await endFromOutput($, await read($, shells))
     const list = await read($, shells)
     const tied = list.filter(sh => sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null)
     if (tied.length > 0) {
@@ -1273,6 +1354,12 @@ async function refreshShells($: EngineInterface): Promise<void> {
 async function loadShellOutput($: EngineInterface): Promise<void> {
   const view = await read($, shellView)
   const sh = (await read($, shells)).find(s => s.id === view.id)
+  if (sh && !sh.outputFile && sh.output !== null) {
+    // a foreground command's output, kept from its result
+    const output = outputTail(sh.output, view.isFull ? SHELL_FULL_LINES : SHELL_LINES)
+    if (output !== view.output) await update($, shellView, v => (v.id === sh.id ? { ...v, output, skipped: 0, outputAt: sh.endedAt, error: null } : v))
+    return
+  }
   if (!sh?.outputFile) return
   try {
     const { size, mtimeMs } = await $.fs.stat(sh.outputFile)
@@ -1366,6 +1453,159 @@ async function stopShell($: EngineInterface, id: string): Promise<void> {
   }
 }
 
+// Agents. $.agent.list() names each subagent and teammate and its status; the pane
+// adds what it sees go by: the spawn (its start, prompt and model), the agent's
+// tool calls and its turns. An agent the list stops naming has ended
+const AGENT_GRACE_MS = 5_000
+const RECENT_TOOLS = 5
+
+function newAgent(id: string, now: number): Agent {
+  return {
+    id, name: null, description: '', type: '', status: 'running', parentId: null, spawnedBy: null, startedAt: now, isStartSeen: false,
+    endedAt: null, prompt: null, model: null, turns: 0, inputTokens: 0, cacheReadTokens: 0, outputTokens: 0, toolCalls: 0, recentTools: [],
+  }
+}
+
+export type AgentListed = { id: string; name?: string; description: string; type: string; status: string; parentId?: string; spawnedBy?: string }
+
+// the list's word on each agent, kept beside what the pane saw; one it no longer
+// names that was running has ended (unless its spawn was only just seen)
+export function mergeAgents(list: Agent[], listed: readonly AgentListed[], now: number): Agent[] {
+  const merged = list.map(a => {
+    const info = listed.find(l => l.id === a.id)
+    if (!info) {
+      return RUNNING.has(a.status) && now - a.startedAt >= AGENT_GRACE_MS ? { ...a, status: 'ended', endedAt: now } : a
+    }
+    return withListed(a, info, now)
+  })
+  const added = listed.filter(l => !list.some(a => a.id === l.id)).map(l => withListed(newAgent(l.id, now), l, now))
+  return [...merged, ...added]
+}
+
+function withListed(a: Agent, info: AgentListed, now: number): Agent {
+  const isRunning = RUNNING.has(info.status)
+  return {
+    ...a,
+    name: info.name ?? null,
+    description: info.description,
+    type: info.type,
+    status: info.status,
+    parentId: info.parentId ?? null,
+    spawnedBy: info.spawnedBy ?? null,
+    endedAt: isRunning ? null : (a.endedAt ?? now),
+  }
+}
+
+export type AgentSpawn = { id: string; at: number; prompt?: string; description?: string; type?: string; name?: string; model?: string }
+
+// a spawn: when it started, what it was asked, which model it runs
+export function recordSpawn(list: Agent[], spawn: AgentSpawn): Agent[] {
+  const found = list.find(a => a.id === spawn.id)
+  const a = found ?? { ...newAgent(spawn.id, spawn.at), description: spawn.description ?? '', type: spawn.type ?? '', name: spawn.name ?? null }
+  const spawned = { ...a, startedAt: spawn.at, isStartSeen: true, prompt: spawn.prompt ?? a.prompt, model: spawn.model ?? a.model }
+  return found ? list.map(x => (x.id === spawn.id ? spawned : x)) : [...list, spawned]
+}
+
+// one of an agent's tool calls: counted, and kept among its last 5. A loop the pane
+// does not know (a workflow's, the engine's own forks) is left out
+export function recordTool(list: Agent[], agentId: string, name: string, detail: string | null, now: number): Agent[] {
+  return list.map(a => (a.id === agentId ? { ...a, toolCalls: a.toolCalls + 1, recentTools: [...a.recentTools, { name, detail, at: now }].slice(-RECENT_TOOLS) } : a))
+}
+
+// one of an agent's turns: its input (the cache's reads and writes included), the
+// share the cache served, its output and its model
+export function recordTurn(list: Agent[], agentId: string, usage: Pick<TurnUsage, 'input_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens' | 'output_tokens'> & { model?: string }): Agent[] {
+  const input = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+  return list.map(a =>
+    a.id === agentId
+      ? {
+          ...a,
+          turns: a.turns + 1,
+          inputTokens: a.inputTokens + input,
+          cacheReadTokens: a.cacheReadTokens + usage.cache_read_input_tokens,
+          outputTokens: a.outputTokens + usage.output_tokens,
+          model: usage.model ?? a.model,
+        }
+      : a,
+  )
+}
+
+// an agent's tokens: "2 turns · 48k in, 91% cached · 1.4k out"
+export function agentTokens(a: Pick<Agent, 'turns' | 'inputTokens' | 'cacheReadTokens' | 'outputTokens'>): string {
+  const cached = a.inputTokens > 0 ? `, ${Math.round((a.cacheReadTokens / a.inputTokens) * 100)}% cached` : ''
+  return `${a.turns} ${a.turns === 1 ? 'turn' : 'turns'} · ${tokens(a.inputTokens)} in${cached} · ${tokens(a.outputTokens)} out`
+}
+
+// what a tool call is about, in a few words: its description, command, file or pattern
+export function toolDetail(input: Record<string, unknown>): string | null {
+  for (const key of ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query']) {
+    const value = input[key]
+    if (typeof value === 'string' && value.trim() !== '') {
+      const line = value.replace(/\s+/g, ' ').trim()
+      return line.length > 60 ? `${line.slice(0, 59)}…` : line
+    }
+  }
+  return null
+}
+
+// what an agent goes by: the name SendMessage knows it by, else its description, else its type
+export function agentLabel(a: Pick<Agent, 'name' | 'description' | 'type' | 'id'>): string {
+  const text = (a.name?.trim() || a.description.trim() || a.type.trim() || a.id).replace(/\s+/g, ' ')
+  return text.length > 40 ? `${text.slice(0, 39)}…` : text
+}
+
+export function pruneAgents(list: Agent[], now: number): Agent[] {
+  return keepRecent(list, now, a => RUNNING.has(a.status))
+}
+
+async function saveAgents($: EngineInterface, change: (list: Agent[], now: number) => Agent[]): Promise<void> {
+  if (!show.agents) return
+  const now = await $.clock.now()
+  const before = await read($, agents)
+  const after = pruneAgents(change(before, now), now)
+  if (JSON.stringify(after) !== JSON.stringify(before)) await update($, agents, () => after)
+}
+
+async function refreshAgents($: EngineInterface): Promise<void> {
+  if (!show.agents) return
+  try {
+    const listed = await $.agent.list()
+    await saveAgents($, (list, now) => mergeAgents(list, listed, now))
+  } catch (error) {
+    $.ui.log(`usage-quota: agents not read: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+async function clearAgents($: EngineInterface): Promise<void> {
+  await saveAgents($, list => list.filter(a => RUNNING.has(a.status)))
+}
+
+async function toggleAgents($: EngineInterface): Promise<void> {
+  const now = !(await read($, agentsCollapsed))
+  await storeSet($, 'agentsCollapsed', now)
+  await update($, agentsCollapsed, () => now)
+}
+
+async function openAgent($: EngineInterface, id: string): Promise<void> {
+  await update($, agentView, () => ({ id, error: null }))
+  await $.ui.open({ id: AGENT, title: AGENT_TITLE, focus: true, closeOnEscape: true })
+}
+
+// Stop: TaskStop, which takes a teammate's or a background agent's id
+async function stopAgent($: EngineInterface, id: string): Promise<void> {
+  try {
+    const answer = await $.tool.call({ tool: 'TaskStop', task_id: id })
+    if (answer.deny !== undefined || answer.isError) {
+      await update($, agentView, v => ({ ...v, error: `not stopped: ${answer.deny ?? answer.text ?? 'refused'}` }))
+      return
+    }
+    await update($, agentView, v => ({ ...v, error: null }))
+    await saveAgents($, (list, now) => list.map(a => (a.id === id && RUNNING.has(a.status) ? { ...a, status: 'killed', endedAt: now } : a)))
+  } catch (error) {
+    await update($, agentView, v => ({ ...v, error: `not stopped: ${error instanceof Error ? error.message : String(error)}` }))
+  }
+}
+
 // The settings pane reads this mod's own /config rows and changes them as the menu
 // would ($.config.set): the value is saved where /config saves it, and Claude Code
 // reloads the mod with it. The pane stays open across that reload.
@@ -1441,6 +1681,8 @@ export const register: Register = (on, options) => {
     $.clock.every(LOCAL_EVERY_MS, () => void refreshSession($))
     void refreshSession($)
     $.clock.every(LOCAL_EVERY_MS, () => void refreshShells($))
+    $.clock.every(LOCAL_EVERY_MS, () => void refreshAgents($))
+    void refreshAgents($)
     void findViewer($)
     $.clock.every(COLLAPSE_EVERY_MS, () => void syncCollapsed($))
     // whatever surface the session started on (a desktop chat may say none)
@@ -1517,6 +1759,8 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     // a subagent's turn is its own cache and its own figures
     const isMain = e.agentId === undefined
+    const agentUsage = e.usage
+    if (!isMain && agentUsage) await saveAgents($, l => recordTurn(l, e.agentId!, agentUsage))
     if (isMain) {
       // the last request of the turn has just read or written the cache: its
       // lifetime counts from now
@@ -1560,35 +1804,88 @@ export const register: Register = (on, options) => {
 
   // a background shell starts: a Bash call that comes back with a backgroundTaskId.
   // Its start is the call's, so a command moved there by ctrl+b keeps its own
+  // A subagent's foreground command is one too, from its call to its result: its
+  // output reaches no transcript the person sees
   on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
     const startedAt = await $.clock.now()
+    const shellOf = async (id: string, extra: Partial<Shell>): Promise<Shell> => {
+      const known = e.agentId ? (await read($, agents)).find(a => a.id === e.agentId) : undefined
+      const listed = e.agentId && !known ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
+      return {
+        id,
+        command: e.command,
+        description: e.description ?? null,
+        toolUseId: e.tool_use_id,
+        agentId: e.agentId ?? null,
+        agent: known ? agentLabel(known) : listed ? (listed.name ?? listed.description ?? listed.type) : null,
+        endsWithAgent: false,
+        outputFile: null,
+        isForeground: false,
+        output: null,
+        startedAt,
+        status: 'running',
+        exitCode: null,
+        endedAt: null,
+        ...extra,
+      }
+    }
+    const foreground = e.agentId && (e as { run_in_background?: boolean }).run_in_background !== true ? `fg:${e.tool_use_id}` : null
+    if (foreground) {
+      try {
+        const sh = await shellOf(foreground, { isForeground: true })
+        await saveShells($, list => [...list.filter(s => s.id !== foreground), sh])
+      } catch (error) {
+        $.ui.log(`usage-quota: command not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+      }
+    }
     const answer = await next(e)
     try {
       const result = answer.result as { backgroundTaskId?: string; backgroundEndsWithFinalResponse?: true } | undefined
       const id = result?.backgroundTaskId
       if (id) {
-        const agent = e.agentId ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
-        const sh: Shell = {
-          id,
-          command: e.command,
-          description: e.description ?? null,
-          toolUseId: e.tool_use_id,
-          agentId: e.agentId ?? null,
-          agent: agent ? (agent.name ?? agent.description ?? agent.type) : null,
-          endsWithAgent: result.backgroundEndsWithFinalResponse === true,
-          outputFile: outputFileOf(answer.text),
-          startedAt,
-          status: 'running',
-          exitCode: null,
-          endedAt: null,
-        }
-        await saveShells($, list => [...list.filter(s => s.id !== id), sh])
+        // in the background (a timeout or ctrl+b moved it there): a task of its own
+        const sh = await shellOf(id, { endsWithAgent: result.backgroundEndsWithFinalResponse === true, outputFile: outputFileOf(answer.text) })
+        await saveShells($, list => [...list.filter(s => s.id !== id && s.id !== foreground), sh])
+      } else if (foreground) {
+        const end = foregroundEnd(answer)
+        await saveShells($, (list, now) => list.map(s => (s.id === foreground && s.status === 'running' ? { ...s, ...end, endedAt: now } : s)))
       }
     } catch (error) {
       $.ui.log(`usage-quota: shell not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
     }
     return answer
   }).catch(($, e, next) => next(e)) // never holds a command back
+
+  // an agent's spawn: its start, its prompt and its model
+  on('agent.spawn', async ($, e, next) => {
+    const at = await $.clock.now()
+    const answer = await next(e)
+    try {
+      const started = answer as { agentId?: string; model?: string }
+      const id = started.agentId
+      if (id) {
+        const input = e as { prompt?: string; description?: string; subagentType?: string; name?: string }
+        await saveAgents($, list => recordSpawn(list, { id, at, prompt: input.prompt, description: input.description, type: input.subagentType, name: input.name, model: started.model }))
+      }
+    } catch (error) {
+      $.ui.log(`usage-quota: agent spawn not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+    return answer
+  }).catch(($, e, next) => next(e)) // never holds a spawn back
+
+  // a tool call in an agent's loop: counted, the last one named
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId) {
+      try {
+        const now = await $.clock.now()
+        const detail = toolDetail(e as unknown as Record<string, unknown>)
+        await saveAgents($, list => recordTool(list, e.agentId!, e.tool, detail, now))
+      } catch (error) {
+        $.ui.log(`usage-quota: agent tool not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // TaskStop: the shell it names was killed (no notification follows)
   on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
@@ -1609,15 +1906,6 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // the notification's transcript row: some reach it alone, without a prompt.submit
-  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const task = e.props.task
-    if (task?.id && task.status && (await read($, shells)).some(sh => sh.id === task.id && sh.status === 'running')) {
-      await saveShells($, (list, now) => endShell(list, { id: task.id!, status: statusOf(task.status), exitCode: null }, now))
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
   on('command.run', { command: 'quota' }, async $ => {
     const now = !(await read($, isOn))
     await update($, isOn, () => now)
@@ -1634,6 +1922,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     const result = await next(e)
     if (e.id === PANE && e.origin.kind === 'person') await update($, isOn, () => false)
+    if (e.id === AGENT) await update($, agentView, () => ({ id: null, error: null }))
     if (e.id === SHELL) await update($, shellView, () => ({ id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
     return result
   }).catch(($, e, next) => next(e)) // a close is never held back by this
@@ -1641,6 +1930,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => drawSettings($, e))
   on('ui.render', { component: 'Pane', requestId: SHELL }, async ($, e) => drawShell($, e))
+  on('ui.render', { component: 'Pane', requestId: AGENT }, async ($, e) => drawAgent($, e))
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
 }
 
@@ -1689,6 +1979,8 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   const info = await read($, sessionInfo)
   const shellList = show.shells ? await read($, shells) : []
   const isShellsCollapsed = await read($, shellsCollapsed)
+  const agentList = show.agents ? await read($, agents) : []
+  const isAgentsCollapsed = await read($, agentsCollapsed)
   await read($, cacheTick) // redrawn every second while the countdown shows
   const drawnAt = (await read($, fieldText)) ?? `${auto.at ?? AT_DEFAULT}`
   const submitAt = (value: string) => commitAt($, value)
@@ -1902,43 +2194,58 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           <Text color={MUTED} wrap="wrap">{`${seconds(info.last.durationMs)} · ${tokens(info.last.outputTokens)} out · ${modelName(info.last.model)}`}</Text>
         ))
       : null
+  // A row of tasks, Agents or Shells: each a button that opens its own pane, the
+  // running ones first, then, dim, the ones that ended lately and how. Clear for
+  // those comes first, so a long list need not be scrolled to reach it. Collapsed
+  // (its arrow, as the band's own), the count alone
+  const taskRow = <T extends { id: string }>(row: {
+    name: string; prefix: string; isCollapsed: boolean; running: T[]; ended: T[]
+    label: (item: T) => string; onToggle: () => void; onClear: () => void; onOpen: (id: string) => void
+  }) => {
+    const count = row.running.length > 0 ? `${row.running.length} running` : 'none running'
+    return detailRow(row.name, [
+      <Box marginRight={1}>
+        <Button key={`${row.prefix}sCollapse`} label={row.isCollapsed ? '▲' : '▼'} plain onPress={row.onToggle} />
+      </Box>,
+      <Text color={MUTED}>{row.isCollapsed ? count : row.running.length > 0 ? `${count}:` : `${count} ·`}</Text>,
+      !row.isCollapsed && row.ended.length > 0 ? (
+        <Box marginLeft={1} marginRight={1}>
+          <Button key={`clear${row.prefix[0]!.toUpperCase()}${row.prefix.slice(1)}s`} label="Clear" onPress={row.onClear} />
+        </Box>
+      ) : null,
+      ...(row.isCollapsed ? [] : [...row.running, ...row.ended]).map(item => (
+        <Box marginLeft={1}>
+          <Button
+            key={`${row.prefix}:${item.id}`}
+            label={row.label(item)}
+            plain
+            {...(row.ended.includes(item) ? { dimColor: true } : {})}
+            onPress={() => row.onOpen(item.id)}
+          />
+        </Box>
+      )),
+    ])
+  }
+  const runningAgents = agentList.filter(a => RUNNING.has(a.status))
   const agentsLine =
-    show.agents && info.agents.length > 0
-      ? detailRow('Agents', (
-          <Text color={MUTED} wrap="wrap">{`${info.agents.length} running: ${info.agents.join(', ')}`}</Text>
-        ))
+    agentList.length > 0
+      ? taskRow({
+          name: 'Agents', prefix: 'agent', isCollapsed: isAgentsCollapsed,
+          running: runningAgents, ended: agentList.filter(a => !RUNNING.has(a.status)).reverse(),
+          label: a => (a.status === 'running' ? agentLabel(a) : `${agentLabel(a)} (${a.status})`),
+          onToggle: () => void toggleAgents($), onClear: () => void clearAgents($), onOpen: id => void openAgent($, id),
+        })
       : null
-  // the background shells, each a button that opens its own pane: the running ones,
-  // then, dim, the ones that ended lately and how. Clear for those comes first, so
-  // a long list need not be scrolled to reach it. Collapsed (its arrow, as the
-  // band's own), the count alone
+  // a subagent's foreground commands show while they run; once ended, in its pane
   const runningShells = shellList.filter(sh => sh.status === 'running')
-  const endedShells = shellList.filter(sh => sh.status !== 'running').reverse()
-  const shellCount = runningShells.length > 0 ? `${runningShells.length} running` : 'none running'
   const shellsLine =
-    shellList.length > 0
-      ? detailRow('Shells', [
-          <Box marginRight={1}>
-            <Button key="shellsCollapse" label={isShellsCollapsed ? '▲' : '▼'} plain onPress={() => toggleShells($)} />
-          </Box>,
-          <Text color={MUTED}>{isShellsCollapsed ? shellCount : runningShells.length > 0 ? `${shellCount}:` : `${shellCount} ·`}</Text>,
-          !isShellsCollapsed && endedShells.length > 0 ? (
-            <Box marginLeft={1} marginRight={1}>
-              <Button key="clearShells" label="Clear" onPress={() => clearShells($)} />
-            </Box>
-          ) : null,
-          ...(isShellsCollapsed ? [] : [...runningShells, ...endedShells]).map(sh => (
-            <Box marginLeft={1}>
-              <Button
-                key={`shell:${sh.id}`}
-                label={sh.status === 'running' ? shellLabel(sh) : `${shellLabel(sh)} (${shellEnd(sh)})`}
-                plain
-                {...(sh.status === 'running' ? {} : { dimColor: true })}
-                onPress={() => openShell($, sh.id)}
-              />
-            </Box>
-          )),
-        ])
+    shellList.some(sh => sh.status === 'running' || !sh.isForeground)
+      ? taskRow({
+          name: 'Shells', prefix: 'shell', isCollapsed: isShellsCollapsed,
+          running: runningShells, ended: shellList.filter(sh => sh.status !== 'running' && !sh.isForeground).reverse(),
+          label: sh => (sh.status === 'running' ? shellLabel(sh) : `${shellLabel(sh)} (${shellEnd(sh)})`),
+          onToggle: () => void toggleShells($), onClear: () => void clearShells($), onOpen: id => void openShell($, id),
+        })
       : null
   // In the band, where the limits and the context stand side by side, the details
   // join their columns: Session and Last turn under the limits, Cache and Compact
@@ -2265,21 +2572,22 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       {sh.description ? <Text color={MUTED} wrap="wrap">{sh.description}</Text> : null}
       <Text> </Text>
       {row('Status', isRunning ? `running for ${cacheLeft(now - sh.startedAt)}` : `${shellEnd(sh)} · ran ${cacheLeft((sh.endedAt ?? now) - sh.startedAt)} · ${duration(now - (sh.endedAt ?? now))} ago`, statusColor)}
-      {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}`) : null}
+      {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}${sh.isForeground ? ', in the foreground' : ''}`) : null}
       {row('ID', sh.id)}
       {sh.outputFile ? row('Output', sh.outputFile) : null}
       {view.outputAt !== null ? row('Changed', `${cacheLeft(Math.max(0, now - view.outputAt))} ago`) : null}
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
-      {sh.outputFile ? (
+      {sh.outputFile || sh.output !== null ? (
         <Box flexDirection="row" columnGap={1} flexWrap="wrap">
           <Button key="fullOutput" label={view.isFull ? `Last ${SHELL_LINES} lines` : 'Full output'} hotkey="f" onPress={() => toggleFullOutput($)} />
-          {viewer ? <Button key="openOutput" label="Open" hotkey="o" onPress={() => openOutput($, sh.outputFile!)} /> : null}
-          {isRunning ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
+          {viewer && sh.outputFile ? <Button key="openOutput" label="Open" hotkey="o" onPress={() => openOutput($, sh.outputFile!)} /> : null}
+          {isRunning && !sh.isForeground ? <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} /> : null}
         </Box>
-      ) : isRunning ? (
+      ) : isRunning && !sh.isForeground ? (
         <Button key="stopShell" label="Stop" hotkey="x" onPress={() => stopShell($, sh.id)} />
       ) : null}
+      {sh.isForeground && isRunning ? <Text color={MUTED} wrap="wrap">A foreground command has no output file: its output shows here when it ends.</Text> : null}
       <Text> </Text>
       {view.output === null ? null : view.output === '' ? (
         <Text color={MUTED}>No output yet.</Text>
@@ -2289,7 +2597,90 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
           {view.output.split('\n').map(line => <Text wrap="wrap">{line === '' ? ' ' : line}</Text>)}
         </Box>
       )}
-      <Text color={MUTED} wrap="wrap">{isRunning ? 'A running shell can show here until the tool call in progress ends. Esc closes this pane.' : 'Esc closes this pane.'}</Text>
+      <Text color={MUTED} wrap="wrap">Esc closes this pane.</Text>
+    </Box>
+  )
+}
+
+// The agent pane: who the agent is, how long it has run, what it has done (its
+// turns, its tool calls, the last one) and what it was asked
+async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
+  const view = await read($, agentView)
+  const list = await read($, agents)
+  const a = list.find(x => x.id === view.id)
+  if (!a) return <Text color={MUTED} wrap="wrap">This agent ended a while ago and is no longer kept. Esc closes this pane.</Text>
+  const now = await $.clock.now()
+  const isRunning = RUNNING.has(a.status)
+  const row = (name: string, value: string, color?: string) => (
+    <Box flexDirection="row">
+      <Box width={12} flexShrink={0}>
+        <Text bold>{name}</Text>
+      </Box>
+      <Box flexShrink={1}>
+        <Text color={color ?? MUTED} wrap="wrap">{value}</Text>
+      </Box>
+    </Box>
+  )
+  const since = a.isStartSeen ? '' : ' (since the pane first saw it)'
+  const status = isRunning
+    ? `${a.status} for ${cacheLeft(now - a.startedAt)}${since}`
+    : `${a.status} · ran ${cacheLeft((a.endedAt ?? now) - a.startedAt)}${since} · ${duration(now - (a.endedAt ?? now))} ago`
+  const parent = a.parentId ? list.find(x => x.id === a.parentId) : undefined
+  const startedBy = [a.parentId ? `subagent ${parent ? agentLabel(parent) : a.parentId}` : null, a.spawnedBy ? `plugin ${a.spawnedBy}` : null].filter(Boolean).join(' · ')
+  const prompt = a.prompt?.split('\n') ?? []
+  // its shells, background and foreground, each opening the shell pane
+  const ownShells = (await read($, shells)).filter(sh => sh.agentId === a.id)
+  return (
+    <Box flexDirection="column">
+      <Text bold wrap="wrap">{a.name ?? (a.description || a.type)}</Text>
+      {a.name && a.description ? <Text color={MUTED} wrap="wrap">{a.description}</Text> : null}
+      <Text> </Text>
+      {row('Status', status, isRunning ? GREEN_TEXT : a.status === 'completed' || a.status === 'ended' ? MUTED : AMBER)}
+      {a.type ? row('Type', a.type) : null}
+      {startedBy ? row('Started by', startedBy) : null}
+      {a.model ? row('Model', modelName(a.model)) : null}
+      {a.turns > 0 ? row('Tokens', agentTokens(a)) : null}
+      {a.toolCalls > 0 ? row('Tool calls', `${a.toolCalls}`) : null}
+      {row('ID', a.id)}
+      <Text> </Text>
+      {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
+      {isRunning ? <Button key="stopAgent" label="Stop" hotkey="x" onPress={() => stopAgent($, a.id)} /> : null}
+      {a.recentTools.length > 0 ? (
+        // newest first: what it is doing now, then what it did before
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>{a.toolCalls > a.recentTools.length ? `Recent tool calls (last ${a.recentTools.length})` : 'Tool calls'}</Text>
+          {[...a.recentTools].reverse().map(t => (
+            <Text color={MUTED} wrap="wrap">{`${t.name}${t.detail ? ` ${t.detail}` : ''} · ${cacheLeft(Math.max(0, now - t.at))} ago`}</Text>
+          ))}
+        </Box>
+      ) : null}
+      {ownShells.length > 0 ? (
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>Shells</Text>
+          {ownShells.map(sh => (
+            <Button
+              key={`agentShell:${sh.id}`}
+              label={`${shellLabel(sh)} (${sh.isForeground ? 'foreground, ' : ''}${shellEnd(sh)})`}
+              plain
+              {...(sh.status === 'running' ? {} : { dimColor: true })}
+              onPress={() => openShell($, sh.id)}
+            />
+          ))}
+        </Box>
+      ) : null}
+      {prompt.length > 0 ? (
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>{prompt.length > 30 ? 'Prompt (first 30 lines)' : 'Prompt'}</Text>
+          {prompt.slice(0, 30).map(line => <Text wrap="wrap">{line === '' ? ' ' : line}</Text>)}
+        </Box>
+      ) : null}
+      <Text> </Text>
+      <Text color={MUTED} wrap="wrap">Esc closes this pane.</Text>
     </Box>
   )
 }
