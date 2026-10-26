@@ -1162,10 +1162,11 @@ async function refreshSession($: EngineInterface): Promise<void> {
 // Background shells. The engine lists none to a mod, so the pane keeps its own,
 // from what it sees go by: a Bash call that comes back with a backgroundTaskId
 // (run in the background, or moved there by ctrl+b or a timeout) starts one; the
-// task notification (prompt.submit, and its transcript row), TaskStop, the Stop
-// hook's background_tasks or the end of the subagent that started it ends it.
-// A main-thread shell's notification waits for the tool call that is running,
-// so a shell can show as running until that call ends
+// last line of its output file ends it, else the task notification
+// (prompt.submit), TaskStop, the Stop hook's background_tasks or the end of the
+// subagent that started it. Nothing here reads state from a transcript row's
+// ui.render: a row that reads a value is drawn again whenever it changes, every
+// row of the transcript at once
 const SHELL_KEEP_MS = 10 * 60_000
 const SHELL_KEEP = 5
 // a subagent's foreground commands that ended: more of them, they come quickly
@@ -1901,15 +1902,6 @@ export const register: Register = (on, options) => {
     if (e.origin.kind === 'task-notification') {
       const ends = notificationsOf(e.text)
       if (ends.length > 0) await saveShells($, (list, now) => ends.reduce((l, end) => endShell(l, end, now), list))
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
-  // the notification's transcript row: some reach it alone, without a prompt.submit
-  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
-    const task = e.props.task
-    if (task?.id && task.status && (await read($, shells)).some(sh => sh.id === task.id && sh.status === 'running')) {
-      await saveShells($, (list, now) => endShell(list, { id: task.id!, status: statusOf(task.status), exitCode: null }, now))
     }
     return next(e)
   }).catch(($, e, next) => next(e))
