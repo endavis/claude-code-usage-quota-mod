@@ -21,6 +21,7 @@ const settings = atom({ plugin: 'usage-quota', key: 'settings' } as const, { row
 const sessionInfo = atom({ plugin: 'usage-quota', key: 'sessionInfo' } as const, { costUsd: null, turns: null, last: null, growth: [] } as SessionInfo)
 const shells = atom({ plugin: 'usage-quota', key: 'shells' } as const, [] as Shell[])
 const shellsCollapsed = atom({ plugin: 'usage-quota', key: 'shellsCollapsed' } as const, false)
+const monitorsCollapsed = atom({ plugin: 'usage-quota', key: 'monitorsCollapsed' } as const, false)
 const agents = atom({ plugin: 'usage-quota', key: 'agents' } as const, [] as Agent[])
 const agentView = atom({ plugin: 'usage-quota', key: 'agentView' } as const, { id: null, error: null } as { id: string | null; error: string | null })
 const agentsCollapsed = atom({ plugin: 'usage-quota', key: 'agentsCollapsed' } as const, false)
@@ -40,6 +41,9 @@ const SHELL_TITLE = 'Shell'
 // a fourth, opened from the Agents row: one subagent or teammate
 const AGENT = 'usage-quota-agent'
 const AGENT_TITLE = 'Agent'
+// a fifth, opened from the Monitors row: the shell pane, for one Monitor task
+const MONITOR = 'usage-quota-monitor'
+const MONITOR_TITLE = 'Monitor'
 
 // two palettes, the desktop's dark and light themes; the band draws in the one the
 // app shows (Theme), set at the start of every draw so all colours below follow it
@@ -830,6 +834,8 @@ async function syncCollapsed($: EngineInterface): Promise<void> {
   if (shellsSaved !== (await read($, shellsCollapsed))) await update($, shellsCollapsed, () => shellsSaved)
   const agentsSaved = ((await storeGet($, 'agentsCollapsed')) as boolean | undefined) === true
   if (agentsSaved !== (await read($, agentsCollapsed))) await update($, agentsCollapsed, () => agentsSaved)
+  const monitorsSaved = ((await storeGet($, 'monitorsCollapsed')) as boolean | undefined) === true
+  if (monitorsSaved !== (await read($, monitorsCollapsed))) await update($, monitorsCollapsed, () => monitorsSaved)
 }
 
 // The desktop app's theme is not told to plugins: it is read from the app's own
@@ -1066,7 +1072,7 @@ export function cacheLeft(ms: number): string {
 
 // What the pane shows, each part a userConfig option (a row in /config; a change
 // there reloads the module with the new values). Every part is on unless set off.
-const SHOW_KEYS = ['limits', 'context', 'compact_forecast', 'cache', 'cache_hits', 'session', 'last_turn', 'agents', 'shells'] as const
+const SHOW_KEYS = ['limits', 'context', 'compact_forecast', 'cache', 'cache_hits', 'session', 'last_turn', 'agents', 'shells', 'monitors'] as const
 type Show = Record<(typeof SHOW_KEYS)[number], boolean>
 export function readShow(options: PluginOptions): Show {
   return Object.fromEntries(SHOW_KEYS.map(key => [key, options[`show_${key}`] !== false])) as Show
@@ -1095,6 +1101,7 @@ const FIELDS: readonly { field: string; label: string; options?: readonly string
   { field: 'show_last_turn', label: 'Show last turn' },
   { field: 'show_agents', label: 'Show running agents' },
   { field: 'show_shells', label: 'Show background shells' },
+  { field: 'show_monitors', label: 'Show monitors' },
 ]
 export const CONFIGURE_COMMAND = 'claude plugin configure usage-quota@claude-code-usage-quota-mod'
 export function givenRows(options: PluginOptions): SettingRow[] {
@@ -1166,7 +1173,8 @@ async function refreshSession($: EngineInterface): Promise<void> {
 // (prompt.submit), TaskStop, the Stop hook's background_tasks or the end of the
 // subagent that started it. Nothing here reads state from a transcript row's
 // ui.render: a row that reads a value is drawn again whenever it changes, every
-// row of the transcript at once
+// row of the transcript at once. A Monitor task is kept here too, and ends the
+// same ways: the engine's own list names it a shell
 const SHELL_KEEP_MS = 10 * 60_000
 const SHELL_KEEP = 5
 // a subagent's foreground commands that ended: more of them, they come quickly
@@ -1190,17 +1198,49 @@ export function outputFileOf(text: string | undefined): string | null {
   return text?.match(/Output is being written to: (\S+?)\.?(?:\s|$)/)?.[1] ?? null
 }
 
+// where a task's output file is: <temp>/claude-<uid>/<the directory, each character
+// other than a letter or digit as ->/<session id>/tasks/<task id>.output. A Monitor's
+// result names none, so its file is found there
+export function tasksDirOf(temp: string, uid: string, dir: string, sessionId: string): string {
+  return `${temp.replace(/[\\/]+$/, '')}/claude-${uid}/${dir.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}/tasks`
+}
+
+// the tasks folder: a known shell's own, else the first of the places Claude Code
+// may put it that is there (none on Windows, where its temp folder is another)
+let tasksDir: string | null = null
+async function findTasksDir($: EngineInterface): Promise<string | null> {
+  if (tasksDir) return tasksDir
+  const known = (await read($, shells)).find(sh => sh.outputFile && !sh.isMonitor)?.outputFile
+  if (known) return (tasksDir = known.slice(0, known.lastIndexOf('/')))
+  if (await $.env.get('APPDATA')) return null
+  const { exitCode, stdout } = await $.process.run(['id', '-u'], { timeoutMs: 5_000 })
+  if (exitCode !== 0 || !stdout.trim()) return null
+  const id = await $.session.id()
+  const temps = [await $.env.get('CLAUDE_CODE_TMPDIR'), await $.env.get('TMPDIR'), '/tmp'].filter((t): t is string => !!t)
+  for (const temp of new Set(temps)) {
+    for (const dir of new Set([await $.session.cwd(), await $.session.root()])) {
+      const path = tasksDirOf(temp, stdout.trim(), dir, id)
+      if (await $.fs.exists(path)) return (tasksDir = path)
+    }
+  }
+  return null
+}
+
 export type ShellEnd = { id: string; status: Shell['status']; exitCode: number | null }
 
 // the task notifications in a prompt's text, each one a task's end: <task-id>,
-// <status>, and the exit code its summary gives ("... completed (exit code 0)")
+// <status>, and the exit code its summary gives ("... completed (exit code 0)", a
+// monitor's "script failed (exit 3)"). A monitor's event has no <status>: no end,
+// unless it is the one that says the monitor expired
 export function notificationsOf(text: string): ShellEnd[] {
   const tag = (block: string, name: string) => block.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]?.trim()
   return [...text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)].flatMap(([, block]) => {
     const id = tag(block!, 'task-id')
     if (!id) return []
-    const code = tag(block!, 'summary')?.match(/exit code (-?\d+)/)?.[1]
-    return [{ id, status: statusOf(tag(block!, 'status')), exitCode: code === undefined ? null : Number(code) }]
+    const status = tag(block!, 'status')
+    if (status === undefined) return /^\[Monitor expired after\b/.test(tag(block!, 'event') ?? '') ? [{ id, status: 'expired' as const, exitCode: null }] : []
+    const code = tag(block!, 'summary')?.match(/\bexit (?:code )?(-?\d+)/)?.[1]
+    return [{ id, status: statusOf(status), exitCode: code === undefined ? null : Number(code) }]
   })
 }
 
@@ -1208,9 +1248,23 @@ function statusOf(word: string | undefined): Shell['status'] {
   return word === 'completed' || word === 'failed' || word === 'killed' ? word : 'ended'
 }
 
-// a shell's end, once: a later word on one already ended changes nothing
+// a shell's end, once: a later word on one already ended changes nothing, but
+// for one that `ended` without saying how (the Stop hook's list left it out before
+// its output file was read), which then says how, from when it ended. A monitor
+// killed once its time was up expired (its output file says [killed] either way)
 export function endShell(list: Shell[], end: ShellEnd, now: number): Shell[] {
-  return list.map(sh => (sh.id === end.id && sh.status === 'running' ? { ...sh, status: end.status, exitCode: end.exitCode, endedAt: now } : sh))
+  return list.map(sh => {
+    if (sh.id !== end.id) return sh
+    if (sh.status === 'running') return { ...sh, status: isExpiry(sh, end, now) ? 'expired' : end.status, exitCode: end.exitCode, endedAt: now }
+    if (sh.status === 'ended' && end.status !== 'ended') return { ...sh, status: isExpiry(sh, end, sh.endedAt ?? now) ? 'expired' : end.status, exitCode: end.exitCode }
+    return sh
+  })
+}
+
+// the timeout is the engine's, its clock a little apart from the pane's
+const MONITOR_SLACK_MS = 1_000
+function isExpiry(sh: Shell, end: ShellEnd, now: number): boolean {
+  return sh.isMonitor === true && end.status === 'killed' && typeof sh.timeoutMs === 'number' && now - sh.startedAt >= sh.timeoutMs - MONITOR_SLACK_MS
 }
 
 // every running shell the engine's own list leaves out has ended
@@ -1223,11 +1277,13 @@ export function endMissing(list: Shell[], running: readonly string[], now: numbe
 
 // the running shells, and the newest few that ended in the last 10 minutes
 export function pruneShells(list: Shell[], now: number): Shell[] {
-  // kept apart, so a subagent's quick commands never push a background shell out
+  // kept apart, so a subagent's quick commands never push a background shell out,
+  // nor shells a monitor
   const isRunning = (sh: Shell) => sh.status === 'running'
   const kept = [
-    ...keepRecent(list.filter(sh => !sh.isForeground), now, isRunning),
+    ...keepRecent(list.filter(sh => !sh.isForeground && !sh.isMonitor), now, isRunning),
     ...keepRecent(list.filter(sh => sh.isForeground), now, isRunning, SHELL_KEEP_FOREGROUND),
+    ...keepRecent(list.filter(sh => sh.isMonitor === true), now, isRunning),
   ]
   return list.filter(sh => kept.includes(sh))
 }
@@ -1288,11 +1344,21 @@ export function endWithAgents(list: Shell[], answered: readonly string[], now: n
   )
 }
 
+// the subagent a shell or monitor came from, by the name the pane gives it
+async function agentNameOf($: EngineInterface, agentId: string | undefined): Promise<string | null> {
+  if (!agentId) return null
+  const known = (await read($, agents)).find(a => a.id === agentId)
+  if (known) return agentLabel(known)
+  const listed = (await $.agent.list()).find(a => a.id === agentId)
+  return listed ? (listed.name ?? listed.description ?? listed.type) : null
+}
+
+// the change made to the list as it is when written, not as it was read: two saves
+// at once (a subagent's command and an output file's end) would undo each other
 async function saveShells($: EngineInterface, change: (list: Shell[], now: number) => Shell[]): Promise<void> {
   const now = await $.clock.now()
   const before = await read($, shells)
-  const after = pruneShells(change(before, now), now)
-  if (JSON.stringify(after) !== JSON.stringify(before)) await update($, shells, () => after)
+  if (JSON.stringify(pruneShells(change(before, now), now)) !== JSON.stringify(before)) await update($, shells, list => pruneShells(change(list, now), now))
 }
 
 // how a background shell ended, from the last line Claude Code writes to its output
@@ -1306,13 +1372,13 @@ export function outputEnd(text: string): ShellEnd | null {
 // the end of each running shell's output file, read again only once the file has
 // changed (its size or time): the first word of a shell's end, a subagent's too,
 // before its notification (held until the tool call in progress ends) or the Stop
-// hook's list
+// hook's list. One that only `ended` is read too, to say how
 const OUTPUT_END_BYTES = 128
 const outputSeen = new Map<string, string>()
 async function endFromOutput($: EngineInterface, list: Shell[]): Promise<void> {
   const ends: ShellEnd[] = []
   for (const sh of list) {
-    if (sh.status !== 'running' || !sh.outputFile) {
+    if ((sh.status !== 'running' && sh.status !== 'ended') || !sh.outputFile) {
       outputSeen.delete(sh.id)
       continue
     }
@@ -1333,11 +1399,15 @@ async function endFromOutput($: EngineInterface, list: Shell[]): Promise<void> {
   if (ends.length > 0) await saveShells($, (l, now) => ends.reduce((acc, end) => endShell(acc, end, now), l))
 }
 
-// every 3s: shells whose output file says they ended end; the shells of subagents
-// that answered end with them; the old ones go; the open shell pane reads its
-// output again
+// every 3s: a monitor whose output file was not found yet is looked for again;
+// shells whose output file says they ended end; the shells of subagents that
+// answered end with them; the old ones go; the open shell pane reads its output again
 async function refreshShells($: EngineInterface): Promise<void> {
   try {
+    if ((await read($, shells)).some(sh => sh.isMonitor && sh.status === 'running' && !sh.outputFile)) {
+      const dir = await findTasksDir($)
+      if (dir) await saveShells($, l => l.map(sh => (sh.isMonitor && !sh.outputFile ? { ...sh, outputFile: `${dir}/${sh.id}.output` } : sh)))
+    }
     await endFromOutput($, await read($, shells))
     const list = await read($, shells)
     const tied = list.filter(sh => sh.status === 'running' && sh.endsWithAgent && sh.agentId !== null)
@@ -1380,9 +1450,9 @@ async function loadShellOutput($: EngineInterface): Promise<void> {
   }
 }
 
-// Clear: the ended shells go, the running ones stay
-async function clearShells($: EngineInterface): Promise<void> {
-  await saveShells($, list => list.filter(sh => sh.status === 'running'))
+// Clear: the ended shells (or monitors) go, the running ones and the other row's stay
+async function clearShells($: EngineInterface, isMonitor = false): Promise<void> {
+  await saveShells($, list => list.filter(sh => sh.status === 'running' || (sh.isMonitor === true) !== isMonitor))
 }
 
 async function toggleShells($: EngineInterface): Promise<void> {
@@ -1392,10 +1462,22 @@ async function toggleShells($: EngineInterface): Promise<void> {
   await update($, shellsCollapsed, () => now)
 }
 
+async function toggleMonitors($: EngineInterface): Promise<void> {
+  const now = !(await read($, monitorsCollapsed))
+  await storeSet($, 'monitorsCollapsed', now)
+  await update($, monitorsCollapsed, () => now)
+}
+
+// a monitor opens in a pane of its own name; the other one, open on the same view,
+// closes first (its close clears the view)
+let shellPaneOpen: string | null = null
 async function openShell($: EngineInterface, id: string): Promise<void> {
+  const pane = (await read($, shells)).find(sh => sh.id === id)?.isMonitor === true ? MONITOR : SHELL
+  if (shellPaneOpen !== null && shellPaneOpen !== pane) await $.ui.close({ id: shellPaneOpen }).catch(() => undefined)
   await update($, shellView, () => ({ id, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
   await loadShellOutput($)
-  await $.ui.open({ id: SHELL, title: SHELL_TITLE, focus: true, closeOnEscape: true })
+  await $.ui.open({ id: pane, title: pane === MONITOR ? MONITOR_TITLE : SHELL_TITLE, focus: true, closeOnEscape: true })
+  shellPaneOpen = pane
 }
 
 // Full output, or back to the last lines
@@ -1562,8 +1644,7 @@ async function saveAgents($: EngineInterface, change: (list: Agent[], now: numbe
   if (!show.agents) return
   const now = await $.clock.now()
   const before = await read($, agents)
-  const after = pruneAgents(change(before, now), now)
-  if (JSON.stringify(after) !== JSON.stringify(before)) await update($, agents, () => after)
+  if (JSON.stringify(pruneAgents(change(before, now), now)) !== JSON.stringify(before)) await update($, agents, list => pruneAgents(change(list, now), now))
 }
 
 async function refreshAgents($: EngineInterface): Promise<void> {
@@ -1793,10 +1874,11 @@ export const register: Register = (on, options) => {
     }
     void detectTtl($)
     // the engine's own list of the background work still running, the subagents'
-    // shells too: a shell of ours it leaves out has ended
+    // shells too: a shell of ours it leaves out has ended. It names a monitor a shell
+    // (2.1.310); 'monitor' is the label its types give
     const tasks = e.background_tasks
     if (tasks) {
-      const running = tasks.filter(t => t.type === 'shell').map(t => t.id)
+      const running = tasks.filter(t => t.type === 'shell' || t.type === 'monitor').map(t => t.id)
       await saveShells($, (list, now) => endMissing(list, running, now))
     }
     return result
@@ -1809,15 +1891,13 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
     const startedAt = await $.clock.now()
     const shellOf = async (id: string, extra: Partial<Shell>): Promise<Shell> => {
-      const known = e.agentId ? (await read($, agents)).find(a => a.id === e.agentId) : undefined
-      const listed = e.agentId && !known ? (await $.agent.list()).find(a => a.id === e.agentId) : undefined
       return {
         id,
         command: e.command,
         description: e.description ?? null,
         toolUseId: e.tool_use_id,
         agentId: e.agentId ?? null,
-        agent: known ? agentLabel(known) : listed ? (listed.name ?? listed.description ?? listed.type) : null,
+        agent: await agentNameOf($, e.agentId),
         endsWithAgent: false,
         outputFile: null,
         isForeground: false,
@@ -1856,6 +1936,43 @@ export const register: Register = (on, options) => {
     return answer
   }).catch(($, e, next) => next(e)) // never holds a command back
 
+  // a monitor starts: a Monitor call that comes back with its task's id. Its output
+  // file is in the tasks folder, written once it has something to say
+  on('tool.call', { tool: 'Monitor' }, async ($, e, next) => {
+    const startedAt = await $.clock.now()
+    const answer = await next(e)
+    try {
+      const result = answer.result as { taskId?: string; timeoutMs?: number } | undefined
+      const id = result?.taskId
+      if (id && !answer.isError) {
+        const input = e as unknown as { command?: string; ws?: { url?: string }; description?: string; timeout_ms?: number }
+        const dir = await findTasksDir($).catch(() => null)
+        const sh: Shell = {
+          id,
+          command: input.command ?? (input.ws?.url ? `WebSocket ${input.ws.url}` : ''),
+          description: input.description ?? null,
+          toolUseId: e.tool_use_id,
+          agentId: e.agentId ?? null,
+          agent: await agentNameOf($, e.agentId),
+          endsWithAgent: false,
+          outputFile: dir ? `${dir}/${id}.output` : null,
+          isForeground: false,
+          output: null,
+          isMonitor: true,
+          timeoutMs: typeof result.timeoutMs === 'number' ? result.timeoutMs : (input.timeout_ms ?? null),
+          startedAt,
+          status: 'running',
+          exitCode: null,
+          endedAt: null,
+        }
+        await saveShells($, list => [...list.filter(s => s.id !== id), sh])
+      }
+    } catch (error) {
+      $.ui.log(`usage-quota: monitor not recorded: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+    return answer
+  }).catch(($, e, next) => next(e)) // never holds a monitor back
+
   // an agent's spawn: its start, its prompt and its model
   on('agent.spawn', async ($, e, next) => {
     const at = await $.clock.now()
@@ -1887,7 +2004,7 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // TaskStop: the shell it names was killed (no notification follows)
+  // TaskStop: the shell or monitor it names was killed (no notification follows)
   on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
     const answer = await next(e)
     const id = (answer.result as { task_id?: string } | undefined)?.task_id
@@ -1897,7 +2014,7 @@ export const register: Register = (on, options) => {
     return answer
   }).catch(($, e, next) => next(e))
 
-  // a task notification: how a shell ended, with its exit code
+  // a task notification: how a shell or monitor ended, with its exit code
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'task-notification') {
       const ends = notificationsOf(e.text)
@@ -1923,13 +2040,17 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.id === PANE && e.origin.kind === 'person') await update($, isOn, () => false)
     if (e.id === AGENT) await update($, agentView, () => ({ id: null, error: null }))
-    if (e.id === SHELL) await update($, shellView, () => ({ id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
+    if (e.id === SHELL || e.id === MONITOR) {
+      if (shellPaneOpen === e.id) shellPaneOpen = null
+      await update($, shellView, () => ({ id: null, isFull: false, output: null, skipped: 0, outputAt: null, error: null }))
+    }
     return result
   }).catch(($, e, next) => next(e)) // a close is never held back by this
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
   on('ui.render', { component: 'Pane', requestId: SETTINGS }, async ($, e) => drawSettings($, e))
   on('ui.render', { component: 'Pane', requestId: SHELL }, async ($, e) => drawShell($, e))
+  on('ui.render', { component: 'Pane', requestId: MONITOR }, async ($, e) => drawShell($, e))
   on('ui.render', { component: 'Pane', requestId: AGENT }, async ($, e) => drawAgent($, e))
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => (await drawQuota($, e)) ?? next(e))
 }
@@ -1977,8 +2098,11 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
   const tick = await read($, fieldTick)
   const cache = await read($, promptCache)
   const info = await read($, sessionInfo)
-  const shellList = show.shells ? await read($, shells) : []
+  const taskList = show.shells || show.monitors ? await read($, shells) : []
+  const shellList = show.shells ? taskList.filter(sh => !sh.isMonitor) : []
+  const monitorList = show.monitors ? taskList.filter(sh => sh.isMonitor === true) : []
   const isShellsCollapsed = await read($, shellsCollapsed)
+  const isMonitorsCollapsed = await read($, monitorsCollapsed)
   const agentList = show.agents ? await read($, agents) : []
   const isAgentsCollapsed = await read($, agentsCollapsed)
   await read($, cacheTick) // redrawn every second while the countdown shows
@@ -2194,7 +2318,7 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           <Text color={MUTED} wrap="wrap">{`${seconds(info.last.durationMs)} · ${tokens(info.last.outputTokens)} out · ${modelName(info.last.model)}`}</Text>
         ))
       : null
-  // A row of tasks, Agents or Shells: each a button that opens its own pane, the
+  // A row of tasks, Agents, Shells or Monitors: each a button that opens its own pane, the
   // running ones first, then, dim, the ones that ended lately and how. Clear for
   // those comes first, so a long list need not be scrolled to reach it. Collapsed
   // (its arrow, as the band's own), the count alone
@@ -2247,15 +2371,24 @@ async function drawQuota($: EngineInterface, e: RenderInput<'Pane' | 'AbovePromp
           onToggle: () => void toggleShells($), onClear: () => void clearShells($), onOpen: id => void openShell($, id),
         })
       : null
+  const monitorsLine =
+    monitorList.length > 0
+      ? taskRow({
+          name: 'Monitors', prefix: 'monitor', isCollapsed: isMonitorsCollapsed,
+          running: monitorList.filter(sh => sh.status === 'running'), ended: monitorList.filter(sh => sh.status !== 'running').reverse(),
+          label: sh => (sh.status === 'running' ? shellLabel(sh) : `${shellLabel(sh)} (${shellEnd(sh)})`),
+          onToggle: () => void toggleMonitors($), onClear: () => void clearShells($, true), onOpen: id => void openShell($, id),
+        })
+      : null
   // In the band, where the limits and the context stand side by side, the details
   // join their columns: Session and Last turn under the limits, Cache and Compact
-  // under the context. Agents, Shells, and every row elsewhere, go in one block below
+  // under the context. Agents, Shells, Monitors, and every row elsewhere, go in one block below
   const inColumns = isBand && isSplit
   const underLimits = inColumns ? [sessionLine, lastLine].filter(row => row !== null) : []
   const underContext = inColumns ? [cacheLine, forecastLine].filter(row => row !== null) : []
   // a whole blank line above, not a margin: the desktop draws margins shorter than a line
   const columnRows = (rows: typeof underLimits) => (rows.length > 0 ? <Box flexDirection="column"><Text> </Text>{rows}</Box> : null)
-  const details = (inColumns ? [agentsLine, shellsLine] : [cacheLine, forecastLine, sessionLine, lastLine, agentsLine, shellsLine]).filter(row => row !== null)
+  const details = (inColumns ? [agentsLine, shellsLine, monitorsLine] : [cacheLine, forecastLine, sessionLine, lastLine, agentsLine, shellsLine, monitorsLine]).filter(row => row !== null)
   const detailBlock = details.length > 0 ? <Box flexDirection="column">{details}</Box> : null
 
   const limitsBlock = (
@@ -2546,15 +2679,17 @@ export function outputHeading(view: Pick<ShellView, 'isFull' | 'output' | 'skipp
 }
 
 // The shell pane: what one background shell runs, how long, how it ended, and the
-// last lines of its output, read again every 3s while the pane is open
+// last lines of its output, read again every 3s while the pane is open. The monitor
+// pane is this one, with when the monitor expires
 async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<RenderElement> {
   const { Box, Text, Button } = $.ui.resolve(e)
   usePalette(e.surface === 'desktop' && (await read($, theme)) === 'light' ? LIGHT : DARK)
   const view = await read($, shellView)
   const sh = (await read($, shells)).find(s => s.id === view.id)
-  if (!sh) return <Text color={MUTED} wrap="wrap">This shell ended a while ago and is no longer kept. Esc closes this pane.</Text>
+  if (!sh) return <Text color={MUTED} wrap="wrap">{`This ${e.requestId === MONITOR ? 'monitor' : 'shell'} ended a while ago and is no longer kept. Esc closes this pane.`}</Text>
   const now = await $.clock.now()
   const isRunning = sh.status === 'running'
+  const expiry = isRunning && sh.isMonitor && typeof sh.timeoutMs === 'number' ? ` · expires in ${cacheLeft(Math.max(0, sh.startedAt + sh.timeoutMs - now))}` : ''
   const row = (name: string, value: string, color?: string) => (
     <Box flexDirection="row">
       <Box width={10} flexShrink={0}>
@@ -2565,16 +2700,16 @@ async function drawShell($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
       </Box>
     </Box>
   )
-  const statusColor = isRunning ? GREEN_TEXT : sh.status === 'completed' && (sh.exitCode ?? 0) === 0 ? MUTED : sh.status === 'ended' ? MUTED : AMBER
+  const statusColor = isRunning ? GREEN_TEXT : sh.status === 'completed' && (sh.exitCode ?? 0) === 0 ? MUTED : sh.status === 'ended' || sh.status === 'expired' ? MUTED : AMBER
   return (
     <Box flexDirection="column">
       <Text bold wrap="wrap">{sh.command}</Text>
       {sh.description ? <Text color={MUTED} wrap="wrap">{sh.description}</Text> : null}
       <Text> </Text>
-      {row('Status', isRunning ? `running for ${cacheLeft(now - sh.startedAt)}` : `${shellEnd(sh)} · ran ${cacheLeft((sh.endedAt ?? now) - sh.startedAt)} · ${duration(now - (sh.endedAt ?? now))} ago`, statusColor)}
+      {row('Status', isRunning ? `running for ${cacheLeft(now - sh.startedAt)}${expiry}` : `${shellEnd(sh)} · ran ${cacheLeft((sh.endedAt ?? now) - sh.startedAt)} · ${duration(now - (sh.endedAt ?? now))} ago`, statusColor)}
       {sh.agent || sh.agentId ? row('Started by', `subagent ${sh.agent ?? sh.agentId}${sh.isForeground ? ', in the foreground' : ''}`) : null}
       {row('ID', sh.id)}
-      {sh.outputFile ? row('Output', sh.outputFile) : null}
+      {sh.outputFile ? row('Output', sh.outputFile) : sh.isMonitor ? row('Output', 'its file is not found') : null}
       {view.outputAt !== null ? row('Changed', `${cacheLeft(Math.max(0, now - view.outputAt))} ago`) : null}
       <Text> </Text>
       {view.error ? <Text color={AMBER} wrap="wrap">{view.error}</Text> : null}
@@ -2630,8 +2765,10 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
   const parent = a.parentId ? list.find(x => x.id === a.parentId) : undefined
   const startedBy = [a.parentId ? `subagent ${parent ? agentLabel(parent) : a.parentId}` : null, a.spawnedBy ? `plugin ${a.spawnedBy}` : null].filter(Boolean).join(' · ')
   const prompt = a.prompt?.split('\n') ?? []
-  // its shells, background and foreground, each opening the shell pane
-  const ownShells = (await read($, shells)).filter(sh => sh.agentId === a.id)
+  // its shells, background and foreground, and its monitors, each opening its pane
+  const own = (await read($, shells)).filter(sh => sh.agentId === a.id)
+  const ownShells = own.filter(sh => !sh.isMonitor)
+  const ownMonitors = own.filter(sh => sh.isMonitor === true)
   return (
     <Box flexDirection="column">
       <Text bold wrap="wrap">{a.name ?? (a.description || a.type)}</Text>
@@ -2665,6 +2802,21 @@ async function drawAgent($: EngineInterface, e: RenderInput<'Pane'>): Promise<Re
             <Button
               key={`agentShell:${sh.id}`}
               label={`${shellLabel(sh)} (${sh.isForeground ? 'foreground, ' : ''}${shellEnd(sh)})`}
+              plain
+              {...(sh.status === 'running' ? {} : { dimColor: true })}
+              onPress={() => openShell($, sh.id)}
+            />
+          ))}
+        </Box>
+      ) : null}
+      {ownMonitors.length > 0 ? (
+        <Box flexDirection="column">
+          <Text> </Text>
+          <Text bold>Monitors</Text>
+          {ownMonitors.map(sh => (
+            <Button
+              key={`agentMonitor:${sh.id}`}
+              label={`${shellLabel(sh)} (${shellEnd(sh)})`}
               plain
               {...(sh.status === 'running' ? {} : { dimColor: true })}
               onPress={() => openShell($, sh.id)}

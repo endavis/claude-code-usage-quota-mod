@@ -46,7 +46,9 @@ export type SessionInfo = {
 /**
  * a background shell of this session, from the Bash call that came back with it
  * (run in the background, or moved there by ctrl+b or a timeout) to its end:
- * `ended` when it went without a notification saying how (a subagent's shell)
+ * `ended` when it went without a notification saying how (a subagent's shell).
+ * A Monitor task is one too, from its call to its end: `expired` when its timeout
+ * killed it
  */
 export type Shell = {
   id: string
@@ -65,8 +67,11 @@ export type Shell = {
    */
   isForeground: boolean
   output: string | null
+  /** a Monitor's task, not a Bash call's: killed by the engine after `timeoutMs` */
+  isMonitor?: boolean
+  timeoutMs?: number | null
   startedAt: number
-  status: 'running' | 'completed' | 'failed' | 'killed' | 'ended'
+  status: 'running' | 'completed' | 'failed' | 'killed' | 'expired' | 'ended'
   exitCode: number | null
   endedAt: number | null
 }
@@ -142,6 +147,7 @@ declare module 'claude-code' {
       shellView: ShellView
       /** the Shells row as its count alone (kept for every chat, as isCollapsed is) */
       shellsCollapsed: boolean
+      monitorsCollapsed: boolean
       /** the agents running, and the ones that ended lately */
       agents: Agent[]
       /** the agent the agent pane shows, and why its last Stop failed */

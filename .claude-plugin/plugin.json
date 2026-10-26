@@ -19,6 +19,7 @@
     "show_session": { "type": "boolean", "title": "Show session cost", "description": "What this session has cost so far, and how many prompts it has had", "default": true },
     "show_last_turn": { "type": "boolean", "title": "Show last turn", "description": "How long the last turn took, its output tokens and its model", "default": true },
     "show_agents": { "type": "boolean", "title": "Show running agents", "description": "The subagents and teammates running, and the ones that ended lately; press one for its details", "default": true },
-    "show_shells": { "type": "boolean", "title": "Show background shells", "description": "The background shells running, and the ones that ended lately; press one for its output", "default": true }
+    "show_shells": { "type": "boolean", "title": "Show background shells", "description": "The background shells running, and the ones that ended lately; press one for its output", "default": true },
+    "show_monitors": { "type": "boolean", "title": "Show monitors", "description": "The monitors running, and the ones that ended lately; press one for its output", "default": true }
   }
 }
